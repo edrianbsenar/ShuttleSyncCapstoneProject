@@ -55,7 +55,10 @@
                     "dark-2": "#101c29",
                     "navy": "#14264a",
                     "line": "#e2e8f0",
-                    "brand": { "blue": "#ff5722", "red": "#ed4817", "dark": "#080f17" }
+                    "brand": { "blue": "#ff5722", "red": "#ed4817", "dark": "#080f17" },
+                    "inverseSurface": "#080f17",
+                    "onPrimaryFixedVariant": "#ffffff",
+                    "primaryFixedDim": "#ff7a50"
                 },
                 borderRadius: {
                     DEFAULT: "0.25rem",
@@ -126,4 +129,10 @@
     .animate-float { animation: float 3s ease-in-out infinite; }
     .shuttlecock-shadow { filter: drop-shadow(0 20px 40px rgba(255, 87, 34, .3)); }
     :focus-visible { outline: 3px solid rgba(255, 87, 34, .45); outline-offset: 2px; }
+    @keyframes pulseSoft { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+    .animate-pulse-soft { animation: pulseSoft 2s ease-in-out infinite; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+    .animate-fade-in { animation: fadeIn .5s ease both; }
+    .kinetic-border { border: 1px solid rgba(255, 87, 34, .35); box-shadow: 0 0 0 1px rgba(255, 87, 34, .12), 0 10px 30px rgba(255, 87, 34, .08); }
+    .kinetic-shadow { box-shadow: 0 12px 32px rgba(255, 87, 34, .10); }
 </style>

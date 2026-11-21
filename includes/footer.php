@@ -8,7 +8,7 @@
         <div class="footer-grid">
             <div class="footer-brand">
                 <a class="brand" href="/" aria-label="HI-POWER Badminton Court home">
-                    <i class="fa-solid fa-bolt brand-mark" aria-hidden="true"></i>
+                    <img src="/img/logo.png" alt="HI-POWER logo" class="h-10 w-10 object-contain shrink-0" loading="lazy">
                     <span class="brand-copy"><strong>HI-POWER</strong><small>BADMINTON COURT</small></span>
                 </a>
                 <p>Better courts. Better players. Together.</p>

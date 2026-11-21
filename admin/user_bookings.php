@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 // Start session
 require_once __DIR__ . '/../includes/session_boot.php';
 
@@ -14,6 +14,7 @@ if ($_SESSION['role'] !== 'Admin' && $_SESSION['role'] !== 'Head Manager') {
 
 require_once __DIR__ . '/../includes/database_connect.php';
 require_once __DIR__ . '/../includes/csrf_helper.php';
+require_once __DIR__ . '/../includes/notification_helper.php';
 
 $admin_name = $_SESSION['full_name'];
 $admin_role = $_SESSION['role'];
@@ -47,14 +48,36 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
                     throw new Exception("Cannot cancel a booking that has already ended.");
                 }
 
+                $old_status = $b['status'];
                 try {
                     $pdo->prepare("UPDATE Bookings SET status = 'Cancelled', cancel_reason = ?, cancelled_at = NOW() WHERE booking_id = ?")->execute([$reason, $booking_id]);
                 } catch (PDOException $e) {
                     $pdo->prepare("UPDATE Bookings SET status = 'Cancelled' WHERE booking_id = ?")->execute([$booking_id]);
                 }
+                
+                // Notify player
+                try {
+                    notify_booking_status_change($pdo, $booking_id, $old_status, 'Cancelled', $reason);
+                } catch (Exception $e) {
+                    error_log("Notification failed: " . $e->getMessage());
+                }
+                
                 $success_message = "Booking cancelled.";
             } elseif ($new_status === 'Confirmed') {
+                // Get old status for notification
+                $cur = $pdo->prepare("SELECT status FROM Bookings WHERE booking_id = ?");
+                $cur->execute([$booking_id]);
+                $old_status = $cur->fetchColumn();
+                
                 $pdo->prepare("UPDATE Bookings SET status = 'Confirmed' WHERE booking_id = ?")->execute([$booking_id]);
+                
+                // Notify player
+                try {
+                    notify_booking_status_change($pdo, $booking_id, $old_status, 'Confirmed', null);
+                } catch (Exception $e) {
+                    error_log("Notification failed: " . $e->getMessage());
+                }
+                
                 $success_message = "Booking successfully marked as Paid/Confirmed.";
             } else {
                 throw new Exception("Invalid status.");
@@ -64,39 +87,72 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
         }
     }
 
-    // TC-AS-021: reschedule a booking (reassign court / date / time)
-    if ($_POST['action'] == 'reschedule_booking') {
+    // TC-AS-021: process a refund for a court booking.
+    // The old reschedule tool (court/date/time reassignment) has been replaced:
+    // an admin refund records a 100% booking refund and cancels the slot.
+    if ($_POST['action'] == 'refund_booking') {
         try {
-            $booking_id = (int)$_POST['booking_id'];
-            $court_id   = (int)$_POST['court_id'];
-            $date       = trim($_POST['booking_date'] ?? '');
-            $start      = trim($_POST['start_time'] ?? '');
-            $end        = trim($_POST['end_time'] ?? '');
+            $booking_id = (int)($_POST['booking_id'] ?? 0);
+            $notes      = trim($_POST['admin_notes'] ?? '');
 
-            if ($court_id <= 0 || $date === '' || $start === '' || $end === '') {
-                throw new Exception("Please provide the new court, date and time.");
-            }
-            if (strtotime($end) <= strtotime($start)) {
-                throw new Exception("End time must be after the start time.");
+            if ($booking_id <= 0) throw new Exception("Invalid booking.");
+            if ($notes === '') throw new Exception("Please provide a reason/note for the refund.");
+
+            $q = $pdo->prepare("
+                SELECT b.booking_id, b.user_id, b.status, b.booking_date, b.start_time, b.end_time,
+                       b.total_price, b.payment_id, p.status AS payment_status
+                FROM Bookings b
+                LEFT JOIN payments p ON p.payment_id = b.payment_id
+                WHERE b.booking_id = ?
+            ");
+            $q->execute([$booking_id]);
+            $booking = $q->fetch();
+            if (!$booking) throw new Exception("Booking not found.");
+            $amount = (float)$booking['total_price'];
+            if ($amount <= 0) throw new Exception("There is no amount to refund.");
+
+            // Migration-safe: refunds.proof_path / admin_notes support.
+            foreach (['proof_path' => 'VARCHAR(255) NULL', 'admin_notes' => 'TEXT NULL'] as $col => $def) {
+                try {
+                    if (!$pdo->query("SHOW COLUMNS FROM refunds LIKE '$col'")->fetch()) {
+                        $pdo->exec("ALTER TABLE refunds ADD COLUMN `$col` $def");
+                    }
+                } catch (PDOException $e) { /* ignore */ }
             }
 
-            $cs = $pdo->prepare("SELECT status FROM Courts WHERE court_id = ?");
-            $cs->execute([$court_id]);
-            if ($cs->fetchColumn() === 'Maintenance') {
-                throw new Exception("The selected court is under maintenance.");
+            // Cancel the slot if it is still active and record the timestamp.
+            $was_active = in_array($booking['status'], ['Pending', 'Pending Payment', 'Confirmed', 'Paid', 'Completed'], true);
+            if ($was_active) {
+                $pdo->prepare("UPDATE Bookings SET status = 'Cancelled', cancelled_at = NOW(), cancel_reason = ? WHERE booking_id = ?")
+                    ->execute([$notes, $booking_id]);
+                try {
+                    require_once __DIR__ . '/../includes/notification_helper.php';
+                    notify_booking_status_change($pdo, $booking_id, $booking['status'], 'Cancelled', $notes);
+                } catch (Exception $e) { /* ignore notification failures */ }
             }
 
-            $chk = $pdo->prepare("SELECT COUNT(*) FROM Bookings WHERE court_id = ? AND booking_date = ? AND booking_id <> ? AND status IN ('Confirmed','Pending','Pending Payment') AND start_time < ? AND end_time > ?");
-            $chk->execute([$court_id, $date, $booking_id, $end, $start]);
-            if ((int)$chk->fetchColumn() > 0) {
-                throw new Exception("That court is already booked for an overlapping time on this date.");
+            // Reuse an existing request for this booking, otherwise create one.
+            $ex = $pdo->prepare("SELECT refund_id FROM refunds WHERE booking_id = ? ORDER BY refund_id DESC LIMIT 1");
+            $ex->execute([$booking_id]);
+            $existing_id = (int)($ex->fetchColumn() ?: 0);
+
+            $reason = function_exists('mb_substr') ? mb_substr($notes, 0, 252) : substr($notes, 0, 252);
+
+            if ($existing_id > 0) {
+                $pdo->prepare("UPDATE refunds SET status = 'Approved', amount = ?, reason = ?, admin_notes = ?, payment_id = ?, processed_at = NULL WHERE refund_id = ?")
+                    ->execute([$amount, $reason, $notes, $booking['payment_id'], $existing_id]);
+                $refund_id = $existing_id;
+            } else {
+                $pdo->prepare("INSERT INTO refunds (user_id, payment_id, order_id, booking_id, amount, reason, admin_notes, status) VALUES (?, ?, NULL, ?, ?, ?, ?, 'Approved')")
+                    ->execute([$booking['user_id'], $booking['payment_id'], $booking_id, $amount, $reason, $notes]);
+                $refund_id = (int)$pdo->lastInsertId();
             }
 
-            $pdo->prepare("UPDATE Bookings SET court_id = ?, booking_date = ?, start_time = ?, end_time = ? WHERE booking_id = ?")
-                ->execute([$court_id, $date, $start, $end, $booking_id]);
-            $success_message = "Booking rescheduled successfully.";
+            $refund_ref = '#REF-' . str_pad((string)$refund_id, 5, '0', STR_PAD_LEFT);
+            $success_message = "Refund approved for Booking #{$booking_id} ({$refund_ref}) — ₱" . number_format($amount, 2)
+                . ". Mark it as Refunded in Refund Requests once the customer has been reimbursed.";
         } catch (Exception $e) {
-            $error_message = "Reschedule failed: " . $e->getMessage();
+            $error_message = "Refund failed: " . $e->getMessage();
         }
     }
 }
@@ -142,8 +198,7 @@ try {
     }
 } catch (PDOException $e) { $cancel_reasons = []; }
 
-// Courts for the reschedule dropdown
-$courts_list = $pdo->query("SELECT court_id, name FROM Courts ORDER BY name ASC")->fetchAll();
+// Courts list is no longer needed: the admin refund tool does not reassign slots.
 
 ?>
 <!DOCTYPE html>
@@ -293,7 +348,7 @@ $courts_list = $pdo->query("SELECT court_id, name FROM Courts ORDER BY name ASC"
                                 
                                 // Status styling
                                 $status = $booking['status'];
-                                // Paid & available can be rescheduled/cancelled; only unpaid can be confirmed.
+                                // Paid & available can be reassigned/cancelled; only unpaid can be confirmed.
                                 $can_confirm = in_array($status, ['Pending', 'Pending Payment'], true);
                                 $is_active   = !in_array($status, ['Cancelled', 'Expired'], true);
                                  $is_ended    = strtotime($booking['booking_date'] . ' ' . $booking['end_time']) <= time();
@@ -358,16 +413,18 @@ $courts_list = $pdo->query("SELECT court_id, name FROM Courts ORDER BY name ASC"
                                             <span class="material-symbols-outlined text-[20px]">check_circle</span>
                                         </button>
                                         <button class="w-9 h-9 rounded-xl flex items-center justify-center transition-all <?php echo ($is_active && !$is_ended) ? 'text-primary hover:bg-primary/5 active:scale-90' : 'text-outline/40 cursor-not-allowed'; ?>" 
-                                                <?php echo ($is_active && !$is_ended) ? "onclick='openRescheduleModal(" . json_encode([
+                                                <?php echo ($is_active && !$is_ended) ? "onclick='openRefundModal(" . json_encode([
                                                     'id' => (int)$booking['booking_id'],
-                                                    'court_id' => (int)$booking['court_id'],
+                                                    'ref' => $booking['booking_reference'],
                                                     'name' => $booking['full_name'],
+                                                    'court' => $booking['court_name'],
                                                     'date' => $booking['booking_date'],
                                                     'start' => date('H:i', strtotime($booking['start_time'])),
                                                     'end' => date('H:i', strtotime($booking['end_time'])),
+                                                    'amount' => '₱' . number_format((float)$booking['total_price'], 2),
                                                 ], JSON_HEX_APOS | JSON_HEX_QUOT) . ")'" : 'disabled'; ?> 
-                                                title="Reschedule">
-                                            <span class="material-symbols-outlined text-[20px]">edit_calendar</span>
+                                                title="Refund Booking">
+                                            <span class="material-symbols-outlined text-[20px]">currency_exchange</span>
                                         </button>
                                         <button class="w-9 h-9 rounded-xl flex items-center justify-center transition-all <?php echo ($is_active && !$is_ended) ? 'text-red-500 hover:bg-red-50 active:scale-90' : 'text-outline/40 cursor-not-allowed'; ?>" 
                                                 <?php echo ($is_active && !$is_ended) ? "onclick=\"openCancelModal({$booking['booking_id']})\"" : 'disabled'; ?> 
@@ -385,13 +442,6 @@ $courts_list = $pdo->query("SELECT court_id, name FROM Courts ORDER BY name ASC"
         </div>
 
         <!-- Footer -->
-        <footer class="mt-12 pt-6 border-t border-outline-variant/30 flex flex-col sm:flex-row justify-between items-center gap-4 text-[11px] font-bold tracking-widest text-outline uppercase pb-8">
-            <p>&copy; <?php echo date('Y'); ?> HI-POWER Technologies</p>
-            <div class="flex gap-6">
-                <a class="hover:text-primary transition-colors" href="analytics.php">System Status</a>
-                <a class="hover:text-primary transition-colors" href="/support.php?tab=contact">Support</a>
-            </div>
-        </footer>
 
     </main>
 
@@ -424,47 +474,39 @@ $courts_list = $pdo->query("SELECT court_id, name FROM Courts ORDER BY name ASC"
     </div>
 </div>
 
-<!-- Reschedule Booking Modal (TC-AS-021) -->
-<div id="rescheduleModal" class="fixed inset-0 z-[200] hidden items-center justify-center p-4" style="background: rgba(15,23,42,0.55); backdrop-filter: blur(2px);">
+<!-- Refund Booking Modal (TC-AS-021) -->
+<div id="refundModal" class="fixed inset-0 z-[200] hidden items-center justify-center p-4" style="background: rgba(15,23,42,0.55); backdrop-filter: blur(2px);">
     <div class="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden" style="animation: modalIn .22s ease-out;">
         <form method="POST" action="user_bookings" class="p-6 space-y-5">
             <?php echo get_csrf_input(); ?>
-            <input type="hidden" name="action" value="reschedule_booking">
+            <input type="hidden" name="action" value="refund_booking">
             <input type="hidden" name="booking_id" id="res_booking_id">
             <div class="flex items-center gap-3">
-                <div class="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
-                    <span class="material-symbols-outlined text-primary">edit_calendar</span>
+                <div class="w-10 h-10 rounded-xl bg-emerald-50 flex items-center justify-center">
+                    <span class="material-symbols-outlined text-emerald-600">currency_exchange</span>
                 </div>
                 <div>
-                    <h3 class="font-bold text-on-surface">Reschedule Booking</h3>
+                    <h3 class="font-bold text-on-surface">Refund Booking</h3>
                     <p class="text-xs text-outline" id="res_customer">&nbsp;</p>
                 </div>
             </div>
-            <div>
-                <label class="block text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-2">Court</label>
-                <select name="court_id" id="res_court" class="w-full h-11 px-4 bg-surface border border-outline-variant/60 rounded-xl text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20">
-                    <?php foreach ($courts_list as $c): ?>
-                        <option value="<?php echo (int)$c['court_id']; ?>"><?php echo htmlspecialchars($c['name']); ?></option>
-                    <?php endforeach; ?>
-                </select>
+            <div class="rounded-xl bg-surface border border-outline-variant/40 p-4 text-sm space-y-1.5">
+                <div class="flex justify-between gap-3"><span class="text-on-surface-variant">Booking</span><strong id="res_booking_ref" class="font-mono text-xs">—</strong></div>
+                <div class="flex justify-between gap-3"><span class="text-on-surface-variant">Court</span><strong id="res_court_name">—</strong></div>
+                <div class="flex justify-between gap-3"><span class="text-on-surface-variant">Schedule</span><strong id="res_schedule">—</strong></div>
+                <div class="flex justify-between gap-3"><span class="text-on-surface-variant">Amount paid</span><strong id="res_amount">—</strong></div>
+                <div class="flex justify-between gap-3"><span class="text-on-surface-variant">Refund</span><strong class="text-emerald-600">100% full refund</strong></div>
+            </div>
+            <div class="p-3 rounded-xl bg-amber-50 border border-amber-200 text-[11px] text-amber-800 leading-relaxed">
+                This cancels the court slot and records a <strong>100% refund</strong> for the booking. Verify the payment in the Payments page first, then mark the request as <strong>Refunded</strong> in Refund Requests after reimbursing the customer.
             </div>
             <div>
-                <label class="block text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-2">Date</label>
-                <input type="date" name="booking_date" id="res_date" required class="w-full h-11 px-4 bg-surface border border-outline-variant/60 rounded-xl text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20">
-            </div>
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-2">Start</label>
-                    <input type="time" name="start_time" id="res_start" required class="w-full h-11 px-4 bg-surface border border-outline-variant/60 rounded-xl text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20">
-                </div>
-                <div>
-                    <label class="block text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-2">End</label>
-                    <input type="time" name="end_time" id="res_end" required class="w-full h-11 px-4 bg-surface border border-outline-variant/60 rounded-xl text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20">
-                </div>
+                <label class="block text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-2">Reason / admin note</label>
+                <textarea name="admin_notes" required rows="3" class="w-full px-3 py-2.5 bg-surface border border-outline-variant/60 rounded-xl text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 resize-none" placeholder="e.g. Approved refund request, court maintenance, payment issue"></textarea>
             </div>
             <div class="flex gap-3 pt-1">
-                <button type="button" onclick="closeRescheduleModal()" class="flex-1 h-11 bg-surface border border-outline-variant/60 text-on-surface rounded-xl font-bold text-sm hover:bg-surface-container-high transition-all">Cancel</button>
-                <button type="submit" class="flex-1 h-11 bg-primary text-white rounded-xl font-bold text-sm hover:brightness-110 transition-all">Save Changes</button>
+                <button type="button" onclick="closeRefundModal()" class="flex-1 h-11 bg-surface border border-outline-variant/60 text-on-surface rounded-xl font-bold text-sm hover:bg-surface-container-high transition-all">Cancel</button>
+                <button type="submit" class="flex-1 h-11 bg-emerald-600 text-white rounded-xl font-bold text-sm hover:brightness-110 transition-all">Approve 100% Refund</button>
             </div>
         </form>
     </div>
@@ -495,26 +537,25 @@ $courts_list = $pdo->query("SELECT court_id, name FROM Courts ORDER BY name ASC"
         m.classList.remove('flex');
     }
 
-    function openRescheduleModal(b) {
+    function openRefundModal(b) {
         document.getElementById('res_booking_id').value = b.id;
         document.getElementById('res_customer').textContent = b.name || '';
-        const courtSel = document.getElementById('res_court');
-        if (courtSel) courtSel.value = b.court_id;
-        document.getElementById('res_date').value = b.date;
-        document.getElementById('res_start').value = b.start;
-        document.getElementById('res_end').value = b.end;
-        const m = document.getElementById('rescheduleModal');
+        document.getElementById('res_booking_ref').textContent = b.ref || ('Booking #' + b.id);
+        document.getElementById('res_court_name').textContent = b.court || '—';
+        document.getElementById('res_schedule').textContent = [b.date, (b.start && b.end) ? (b.start + '–' + b.end) : ''].filter(Boolean).join(' • ');
+        document.getElementById('res_amount').textContent = b.amount || '—';
+        const m = document.getElementById('refundModal');
         m.classList.remove('hidden');
         m.classList.add('flex');
     }
-    function closeRescheduleModal() {
-        const m = document.getElementById('rescheduleModal');
+    function closeRefundModal() {
+        const m = document.getElementById('refundModal');
         m.classList.add('hidden');
         m.classList.remove('flex');
     }
 
     // Close modals on backdrop click
-    ['cancelModal', 'rescheduleModal'].forEach(id => {
+    ['cancelModal', 'refundModal'].forEach(id => {
         const m = document.getElementById(id);
         if (m) m.addEventListener('click', e => { if (e.target === m) { m.classList.add('hidden'); m.classList.remove('flex'); } });
     });

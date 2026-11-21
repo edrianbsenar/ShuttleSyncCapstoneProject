@@ -68,9 +68,11 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['a
         $lk = $pdo->prepare("SELECT court_id FROM booking_locks WHERE court_id = ? AND booking_date = ? FOR UPDATE");
         $lk->execute([$court_id, $view_date]);
 
-        // Release expired holds (15 minutes).
-        $pdo->prepare("UPDATE Bookings SET status = 'Expired' WHERE court_id = ? AND booking_date = ? AND status IN ('In Cart','Pending Payment') AND created_at < (NOW() - INTERVAL 15 MINUTE)")
-            ->execute([$court_id, $view_date]);
+        // Release expired cart holds (5 minutes). Pending Payment (receipt submitted) is not auto-expired; it stays for admin verification.
+        if ($has_created_col) {
+            $pdo->prepare("UPDATE Bookings SET status = 'Expired' WHERE court_id = ? AND booking_date = ? AND status = 'In Cart' AND created_at < (NOW() - INTERVAL 5 MINUTE)")
+                ->execute([$court_id, $view_date]);
+        }
 
         $cs = $pdo->prepare("SELECT status" . ($has_price_col ? ", price_per_hour" : "") . " FROM Courts WHERE court_id = ?");
         $cs->execute([$court_id]);
@@ -112,12 +114,17 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action']) && $_POST['a
 $courts = $pdo->query("SELECT * FROM Courts ORDER BY court_id ASC")->fetchAll();
 $existing_bookings_by_court = [];
 try {
-    // Confirmed bookings and unexpired holds both block a slot.
-    $active_sql = "b.status = 'Confirmed'";
+    // Release stale cart holds for this date so slots reopen reliably (5 minutes). Pending Payment stays for admin verification.
     if ($has_created_col) {
-        $active_sql .= " OR (b.status IN ('In Cart','Pending Payment') AND b.created_at >= (NOW() - INTERVAL 15 MINUTE))";
+        $pdo->prepare("UPDATE Bookings SET status = 'Expired' WHERE booking_date = ? AND status = 'In Cart' AND created_at < (NOW() - INTERVAL 5 MINUTE)")
+            ->execute([$view_date]);
+    }
+    // Confirmed and Pending Payment (submitted, awaiting admin) block slots. In Cart holds block only for 5 minutes.
+    $active_sql = "b.status = 'Confirmed' OR b.status = 'Pending Payment'";
+    if ($has_created_col) {
+        $active_sql .= " OR (b.status = 'In Cart' AND b.created_at >= (NOW() - INTERVAL 5 MINUTE))";
     } else {
-        $active_sql .= " OR b.status IN ('In Cart','Pending Payment')";
+        $active_sql .= " OR b.status = 'In Cart'";
     }
     $bs = $pdo->prepare("SELECT b.court_id, b.start_time, b.end_time, b.status FROM Bookings b WHERE b.booking_date = ? AND ({$active_sql}) ORDER BY b.start_time ASC");
     $bs->execute([$view_date]);
@@ -138,7 +145,8 @@ $grid = [];
 foreach ($courts as $court) {
     $cid = $court['court_id'];
     $c_price = ($has_price_col && (float)($court['price_per_hour'] ?? 0) > 0) ? (float)$court['price_per_hour'] : $DEFAULT_RATE;
-    $grid[$cid] = ['id'=>$cid, 'name'=>$court['name'], 'status'=>$court['status']??'Available', 'price'=>$c_price, 'open_count'=>0, 'total_count'=>count($hours), 'slots'=>[]];
+    $c_type = $court['court_type'] ?? ((int)$cid === 3 || (int)$cid === 4 ? 'Standard' : 'Premium');
+    $grid[$cid] = ['id'=>$cid, 'name'=>$court['name'], 'status'=>$court['status']??'Available', 'price'=>$c_price, 'type'=>$c_type, 'open_count'=>0, 'total_count'=>count($hours), 'slots'=>[]];
     foreach ($hours as $h) {
         $ts = sprintf('%02d:00:00',$h);
         $grid[$cid]['slots'][$ts] = ['s'=>'open','md'=>22-$h];
@@ -314,8 +322,8 @@ foreach ($courts as $court) {
       .cb-hint { display: none; padding: 8px 14px; font-size: 11px; color: #7b8aa3; border-top: 1px solid #eef2f6; background: #fafbfd; }
 
       /* ---------- Booking panel ---------- */
-      .cb-panel { position: fixed; left: 50%; bottom: 24px; z-index: 70; width: min(440px, calc(100% - 24px)); transform: translate(-50%, 24px); opacity: 0; pointer-events: none; transition: transform .25s ease, opacity .25s ease; color: var(--cb-navy); font-family: "Manrope", sans-serif; }
-      .cb-panel.show { transform: translate(-50%, 0); opacity: 1; pointer-events: auto; }
+      .cb-panel { position: fixed; left: 50%; top: 50%; bottom: auto; z-index: 70; width: min(440px, calc(100% - 24px)); max-height: calc(100vh - 32px); overflow: auto; transform: translate(-50%, -40%); opacity: 0; pointer-events: none; transition: transform .25s ease, opacity .25s ease; color: var(--cb-navy); font-family: "Manrope", sans-serif; }
+      .cb-panel.show { transform: translate(-50%, -50%); opacity: 1; pointer-events: auto; }
       .cb-panel-inner { background: #fff; border: 1px solid #edf1f6; border-radius: 18px; box-shadow: 0 24px 60px rgba(8,15,23,.28); padding: 16px; }
       .cb-panel-top { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
       .cb-panel-icon { flex: none; width: 38px; height: 38px; border-radius: 11px; background: linear-gradient(135deg, #ff6b3d, #f0382f); color: #fff; display: grid; place-items: center; font-size: 16px; }
@@ -390,7 +398,7 @@ foreach ($courts as $court) {
         .cb-hint { display: block; }
       }
       @media (max-width: 767px) {
-        .cb-panel { bottom: 84px; } /* clear the mobile bottom nav */
+        .cb-panel { top: 50%; bottom: auto; } /* centered modal on mobile */
       }
       @media (max-width: 680px) {
         .cb-wrap { width: min(100% - 30px, 560px); }
@@ -613,7 +621,6 @@ $pct = function ($h) use ($H0, $N) { return number_format((($h - $H0) / $N) * 10
         </div>
         <div class="cb-fields">
             <select id="bpDur" aria-label="Duration"></select>
-            <input type="number" id="bpPlayers" min="1" max="20" value="2" placeholder="Pax" aria-label="Number of players">
         </div>
         <div class="cb-panel-foot">
             <span class="cb-total" id="bpTotal">₱0</span>
@@ -625,6 +632,7 @@ $pct = function ($h) use ($H0, $N) { return number_format((($h - $H0) / $N) * 10
                 <button type="button" class="cb-btn" onclick="doBook()"><i class="fa-solid fa-bolt"></i> Book &amp; Pay</button>
             <?php endif; ?>
         </div>
+        <p style="margin:10px 0 0; font-size:10.5px; line-height:1.45; color:#6b7b93;"><strong>Policy:</strong> Court bookings may be cancelled only at least 24 hours before the scheduled start. After cancelling, a refund request must be submitted within 24 hours. Approved and verified requests receive a 100% full refund of the amount paid.</p>
     </div>
 </div>
 
@@ -635,7 +643,7 @@ $pct = function ($h) use ($H0, $N) { return number_format((($h - $H0) / $N) * 10
     <input type="hidden" id="fCid" name="court_id">
     <input type="hidden" id="fTime" name="start_time">
     <input type="hidden" id="fDur" name="duration">
-    <input type="hidden" id="fPly" name="player_count">
+    <input type="hidden" id="fPly" name="player_count" value="2">
 </form>
 
 <!-- Court image modal -->
@@ -742,7 +750,7 @@ function doBook(){
     document.getElementById('fCid').value=chosen.dataset.cid;
     document.getElementById('fTime').value=chosen.dataset.ts;
     document.getElementById('fDur').value=document.getElementById('bpDur').value;
-    document.getElementById('fPly').value=document.getElementById('bpPlayers').value;
+    document.getElementById('fPly').value='2';
     document.getElementById('bkForm').submit();
 }
 
@@ -758,7 +766,11 @@ function goDate(inp){
     window.location.href='courtbooking?date='+inp.value;
 }
 
-function courtType(id){ return (id===3||id===4) ? 'Standard' : 'Premium'; }
+function courtType(id){
+  const c = (typeof gridData !== 'undefined') ? gridData[id] : null;
+  if (c && c.type) return c.type;
+  return (id===3||id===4) ? 'Standard' : 'Premium';
+}
 
 // Browsers other than Safari can't display .heic, so try web formats first and HEIC last.
 const COURT_IMG_DIR = '/img/courts/';

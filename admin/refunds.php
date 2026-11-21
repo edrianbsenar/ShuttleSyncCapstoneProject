@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 // Start session
 require_once __DIR__ . '/../includes/session_boot.php';
 
@@ -18,6 +18,13 @@ require_once __DIR__ . '/../includes/csrf_helper.php';
 $success_message = '';
 $error_message = '';
 
+if (!function_exists('refund_status_label')) {
+    // The stored value 'Refunded' is already the admin-facing label.
+    function refund_status_label(string $status): string {
+        return $status;
+    }
+}
+
 // ==========================================
 // HANDLE REFUND ACTIONS (TC-AS-023)
 // ==========================================
@@ -30,7 +37,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
             $notes = trim($_POST['admin_notes'] ?? '');
 
             if (!in_array($new_status, ['Approved', 'Refunded', 'Rejected'], true)) {
-                throw new Exception("Invalid refund status.");
+                throw new Exception("Invalid request status.");
             }
 
             $cur = $pdo->prepare("SELECT r.status, u.full_name, u.email FROM refunds r JOIN Users u ON u.user_id = r.user_id WHERE r.refund_id = ?");
@@ -39,8 +46,14 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
             if (!$refund_owner) throw new Exception("Refund request not found.");
             $current = $refund_owner['status'];
 
+            if (in_array($current, ['Refunded', 'Rejected'], true)) {
+                throw new Exception("This request is already " . strtolower($current) . " and can no longer be changed.");
+            }
             if ($new_status === 'Approved' && $current !== 'Pending') {
-                throw new Exception("Only pending refund requests can be approved.");
+                throw new Exception("Only pending requests can be approved.");
+            }
+            if ($new_status === 'Rejected' && $current !== 'Pending') {
+                throw new Exception("Only pending requests can be rejected. This request is already " . strtolower($current) . ".");
             }
 
             $processed = in_array($new_status, ['Refunded', 'Rejected'], true) ? 'NOW()' : 'NULL';
@@ -48,7 +61,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
                 ->execute([$new_status, $notes !== '' ? $notes : null, $refund_id]);
 
             $refund_ref = '#REF-' . str_pad($refund_id, 5, '0', STR_PAD_LEFT);
-            $success_message = "Refund " . $refund_ref . " marked as " . $new_status . ".";
+            $success_message = "Refund request " . $refund_ref . " marked as " . refund_status_label($new_status) . ".";
 
             // Send an email only on the first Pending -> Approved transition.
             if ($new_status === 'Approved' && $current === 'Pending') {
@@ -56,23 +69,20 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
                 if ($recipient) {
                     $subject = 'HI-POWER refund request approved';
                     $body = "Hello " . ($refund_owner['full_name'] ?: 'Customer') . ",\n\n"
-                        . "Your refund request " . $refund_ref . " has been approved by HI-POWER.\n"
-                        . "Requested amount: PHP " . number_format((float)($pdo->query("SELECT amount FROM refunds WHERE refund_id = " . (int)$refund_id)->fetchColumn() ?: 0), 2) . "\n\n"
-                        . "Please note that approval confirms your request; the actual refund may still require processing by the payment provider.\n\n"
+                        . "Your refund request " . $refund_ref . " has been approved by HI-POWER.\n\n"
+                        . "Approved and verified requests qualify for a 100% full refund of the total amount paid.\n"
+                        . "Our team will process your refund and contact you if any additional verification is needed.\n\n"
+                        . "If you have questions, reply to this email or contact support@hipowerbc.xyz.\n\n"
                         . "Thank you,\nHI-POWER Support";
-                    $headers = "From: HI-POWER Support <no-reply@" . (preg_replace('/[^a-z0-9.-]/i', '', $_SERVER['HTTP_HOST'] ?? 'hipowerbc.xyz') ?: 'hipowerbc.xyz') . ">\r\n"
-                        . "Content-Type: text/plain; charset=UTF-8\r\n";
-                    if (mail($recipient, $subject, $body, $headers)) {
-                        $success_message .= " Approval email sent to " . $recipient . ".";
-                    } else {
-                        $error_message = "Refund approved, but the email could not be sent. Configure the server's mail transport (SMTP/sendmail) and retry notification manually.";
-                    }
+                    // Same as send_code.php: fire the mail and move on (no SMTP, no error shown).
+                    mail($recipient, $subject, $body);
+                    $success_message .= " Approval email sent to " . $recipient . ".";
                 } else {
-                    $error_message = "Refund approved, but the customer's account email is missing or invalid.";
+                    $error_message = "Refund request approved, but the customer's account email is missing or invalid.";
                 }
             }
         } catch (Exception $e) {
-            $error_message = "Failed to process refund: " . $e->getMessage();
+            $error_message = "Failed to process request: " . $e->getMessage();
         }
     }
 }
@@ -163,18 +173,22 @@ try {
             </div>
             <div>
                 <h1 class="text-2xl font-bold text-on-surface tracking-tight">Refund Requests</h1>
-                <p class="text-sm text-on-surface-variant mt-0.5">Review, approve and settle customer refund requests.</p>
+                <p class="text-sm text-on-surface-variant mt-0.5">Review and process customer requests.</p>
                 <div class="hp-page-actions mt-4 no-print">
                     <button type="button" class="hp-action hp-action--primary" onclick="exportRefundsCSV()"><span class="material-symbols-outlined">download</span> Export CSV</button>
                     <button type="button" class="hp-action" onclick="window.print()"><span class="material-symbols-outlined">print</span> Print</button>
                 </div>
             </div>
         </div>
+        <div class="mt-4 p-4 bg-amber-50 border border-amber-200 rounded-2xl text-sm text-amber-900">
+            <p class="font-bold mb-1">Policy reminder</p>
+            <p>Players can request a refund directly from an <strong>approved court booking</strong> or a <strong>confirmed shop order</strong>. Every request must include a <strong>proof file</strong> (receipt, screenshot, or supporting document). Approved and verified requests qualify for a <strong>100% full refund</strong> of the amount paid, processed manually after admin review and reimbursement.</p>
+        </div>
     </div>
 
     <?php if (!$table_ready): ?>
         <div class="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-sm text-amber-800">
-            <p class="font-bold mb-1">Refund table not found.</p>
+            <p class="font-bold mb-1">Refund requests table not found.</p>
             <p>Run <code class="bg-amber-100 px-1.5 py-0.5 rounded">database_admin_upgrade.sql</code> once via phpMyAdmin to enable the refund workflow.</p>
         </div>
     <?php else: ?>
@@ -262,14 +276,16 @@ try {
                                 <?php endif; ?>
                             </td>
                             <td class="py-4 px-6 text-sm font-bold text-on-surface">₱<?php echo number_format($r['amount'], 2); ?></td>
-                            <td class="py-4 px-6"><span class="badge <?php echo $badge; ?>"><?php echo htmlspecialchars($r['status']); ?></span></td>
+                            <td class="py-4 px-6"><span class="badge <?php echo $badge; ?>"><?php echo htmlspecialchars(refund_status_label($r['status'])); ?></span></td>
                             <td class="py-4 px-6">
                                 <div class="flex justify-end gap-1.5">
                                     <?php if ($r['status'] === 'Pending'): ?>
                                         <button onclick="processRefund(<?php echo (int)$r['refund_id']; ?>, 'Approved')" class="h-9 px-3 rounded-xl text-xs font-bold text-blue-600 hover:bg-blue-50 transition-all" title="Approve">Approve</button>
                                     <?php endif; ?>
                                     <?php if (in_array($r['status'], ['Pending', 'Approved'], true)): ?>
-                                        <button onclick="processRefund(<?php echo (int)$r['refund_id']; ?>, 'Refunded')" class="h-9 px-3 rounded-xl text-xs font-bold text-emerald-600 hover:bg-emerald-50 transition-all" title="Mark released">Mark Released</button>
+                                        <button onclick="processRefund(<?php echo (int)$r['refund_id']; ?>, 'Refunded')" class="h-9 px-3 rounded-xl text-xs font-bold text-emerald-600 hover:bg-emerald-50 transition-all" title="Mark refunded">Mark Refunded</button>
+                                    <?php endif; ?>
+                                    <?php if ($r['status'] === 'Pending'): ?>
                                         <button onclick="processRefund(<?php echo (int)$r['refund_id']; ?>, 'Rejected')" class="h-9 px-3 rounded-xl text-xs font-bold text-red-500 hover:bg-red-50 transition-all" title="Reject">Reject</button>
                                     <?php endif; ?>
                                     <?php if (in_array($r['status'], ['Refunded', 'Rejected'], true)): ?>
@@ -286,10 +302,6 @@ try {
     </div>
 
     <?php endif; ?>
-
-    <footer class="mt-12 pt-6 border-t border-outline-variant/30 flex flex-col sm:flex-row justify-between items-center gap-4 text-[11px] font-bold tracking-widest text-outline uppercase pb-8">
-        <p>&copy; <?php echo date('Y'); ?> HI-POWER Technologies</p>
-    </footer>
 </main>
 
 <script>
@@ -309,10 +321,10 @@ try {
     }
 
     function processRefund(refundId, status) {
-        const labels = { 'Approved': 'approve', 'Refunded': 'mark as released', 'Rejected': 'reject' };
+        const labels = { 'Approved': 'approve', 'Refunded': 'mark as refunded', 'Rejected': 'reject' };
         let note = prompt('Optional note for this action (e.g. reference number):', '');
         if (note === null) return; // cancelled
-        if (!confirm('Are you sure you want to ' + labels[status] + ' refund #REF-' + String(refundId).padStart(5, '0') + '?')) return;
+        if (!confirm('Are you sure you want to ' + labels[status] + ' refund request #REF-' + String(refundId).padStart(5, '0') + '?')) return;
         document.getElementById('ra_refund_id').value = refundId;
         document.getElementById('ra_status').value = status;
         document.getElementById('ra_notes').value = note;

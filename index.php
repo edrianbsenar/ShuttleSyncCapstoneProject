@@ -21,14 +21,15 @@ if (isset($pdo)) {
         $registered_players = 0;
     }
     try {
-        $courts = $pdo->query("SELECT name, status FROM Courts ORDER BY court_id ASC LIMIT 8")->fetchAll();
+        $courts = $pdo->query("SELECT court_id, name, status FROM Courts ORDER BY court_id ASC LIMIT 8")->fetchAll();
     } catch (PDOException $e) {
         $courts = [];
     }
 }
 if (empty($courts)) {
     for ($i = 1; $i <= 8; $i++) {
-        $courts[] = ['name' => "Court {$i} - " . ($i === 1 ? 'Premium' : 'Standard'), 'status' => 'Available'];
+        $type = ($i === 3 || $i === 4) ? 'Standard' : 'Premium';
+        $courts[] = ['court_id' => $i, 'name' => "Court {$i}", 'status' => 'Available', 'type' => $type];
     }
 }
 
@@ -334,9 +335,12 @@ $cta_img     = $site_imgs[2] ?? ($site_imgs[0] ?? 'badminton-hero.png');
           <h3 class="availability-heading">Live availability</h3>
           <?php foreach ($courts as $court):
             $statusClass = ($court['status'] === 'Maintenance') ? 'maintenance' : '';
+            $cid = (int)($court['court_id'] ?? 0);
+            $courtType = ($cid === 3 || $cid === 4) ? 'Standard' : 'Premium'; // based on court
+            $courtLabel = 'Court ' . $cid . ' - ' . $courtType;
           ?>
           <div class="court-row">
-            <span class="court-name"><?php echo htmlspecialchars($court['name']); ?></span>
+            <span class="court-name"><?php echo htmlspecialchars($courtLabel); ?></span>
             <span class="status <?php echo $statusClass; ?>"><?php echo htmlspecialchars($court['status']); ?></span>
             <a href="/courtbooking" class="text-on-surface-variant hover:text-primary transition-colors" aria-label="View courts"><i class="fa-solid fa-chevron-right"></i></a>
           </div>

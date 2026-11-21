@@ -94,94 +94,175 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
     }
 }
 ?>
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Forgot Password | HI-POWER</title>
-<style>
-:root{--navy:#071a2b;--orange:#ff510b;--ink:#10233f;--muted:#7d8eaa;--line:#d8e1ed;--blue:#174ee8}
-*{box-sizing:border-box}body{margin:0;font-family:Inter,Arial,sans-serif;color:var(--ink);background:#fff}
-.page{min-height:100vh;display:grid;grid-template-columns:1fr 1fr}
-.visual{position:relative;min-height:100vh;overflow:hidden;background:linear-gradient(90deg,rgba(2,16,27,.68),rgba(2,16,27,.22)),url('https://images.unsplash.com/photo-1626224583764-f87db24ac4ea?auto=format&fit=crop&w=1200&q=80') center/cover no-repeat,#071a2b;color:#fff;padding:58px clamp(32px,5.5vw,92px);display:flex;flex-direction:column}
-.brand{display:flex;align-items:center;gap:13px;font-weight:800;font-size:27px;letter-spacing:.2px;position:relative;z-index:1}
-.brand-mark{font-size:48px;line-height:1;color:var(--orange);font-weight:900;font-style:italic;transform:skew(-12deg)}
-.brand small{display:block;font-size:13px;letter-spacing:1.4px;font-weight:600;margin-top:2px}
-.visual-copy{margin-top:clamp(90px,13vh,160px);max-width:600px;position:relative;z-index:1}
-.visual-copy h1{font-size:clamp(38px,4vw,64px);line-height:1.08;letter-spacing:-1.8px;margin:0 0 22px;font-weight:800}
-.visual-copy h1 span{display:block;color:var(--orange)}
-.visual-copy p{font-size:19px;line-height:1.65;color:#e1e9f3;max-width:480px;margin:0}
-.form-side{min-height:100vh;position:relative;display:flex;align-items:center;justify-content:center;padding:48px clamp(28px,6vw,96px);overflow:hidden;background:#fff}
-.form-side:before,.form-side:after{content:"";position:absolute;width:170px;height:14px;background:#eef2f8;transform:rotate(-48deg);right:-34px;top:40px}
-.form-side:after{width:115px;background:var(--orange);right:-28px;top:58px}
-.corner-bottom{position:absolute;right:-50px;bottom:38px;width:180px;height:13px;background:#eef2f8;transform:rotate(-48deg)}
-.corner-bottom:after{content:"";position:absolute;right:-18px;top:28px;width:100px;height:8px;background:var(--orange)}
-.form-wrap{width:100%;max-width:590px;position:relative;z-index:1}
-.home{display:inline-flex;gap:10px;align-items:center;text-decoration:none;color:#657996;font-size:16px;font-weight:600;margin-bottom:48px}
-.home:hover{color:var(--orange)}
-h2{font-size:clamp(36px,3.2vw,50px);letter-spacing:-1.3px;margin:0 0 8px;color:#0c1d38}
-.subtitle{font-size:19px;line-height:1.5;color:var(--muted);margin:0 0 34px}
-.google{width:100%;height:64px;border:1.5px solid var(--line);border-radius:14px;background:#fff;color:#172743;font-size:17px;font-weight:650;display:flex;align-items:center;justify-content:center;gap:15px;cursor:pointer}
-.google:hover{border-color:#aebed4;background:#fbfcfe}
-.google-g{font-size:29px;font-weight:800;font-family:Arial,sans-serif;background:conic-gradient(from -45deg,#4285f4 0 25%,#34a853 0 50%,#fbbc05 0 72%,#ea4335 0);color:transparent;background-clip:text;-webkit-background-clip:text}
-.divider{display:flex;align-items:center;gap:20px;color:#8291a9;font-size:15px;margin:28px 0}
-.divider:before,.divider:after{content:"";height:1px;background:#dce3ed;flex:1}
-.field{position:relative;margin-bottom:18px}
-.field input{width:100%;height:64px;border:1.5px solid #d8e1ed;border-radius:13px;padding:0 52px 0 62px;font-size:16px;color:#172743;outline:none;background:#fff}
-.field input::placeholder{color:#9aa9bf}
-.field input:focus{border-color:var(--orange);box-shadow:0 0 0 3px rgba(255,81,11,.09)}
-.field-icon{position:absolute;left:22px;top:50%;transform:translateY(-50%);font-size:21px;color:#253d5d;pointer-events:none}
-.toggle{position:absolute;right:18px;top:50%;transform:translateY(-50%);border:0;background:none;color:#8b9ab0;font-size:20px;cursor:pointer}
-.options{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:22px 0 34px;color:#667994;font-size:16px}
-.remember{display:flex;align-items:center;gap:10px}
-input[type=checkbox]{width:20px;height:20px;accent-color:var(--orange);margin:0}
-a{color:var(--orange);text-decoration:none;font-weight:650}.primary{width:100%;height:64px;border:0;border-radius:13px;background:var(--orange);color:#fff;font-size:17px;font-weight:750;cursor:pointer;box-shadow:0 8px 18px rgba(255,81,11,.13);transition:transform .15s,background .15s}
-.primary:hover{background:#ed4706;transform:translateY(-1px)}
-.primary span{font-size:23px;margin-left:12px;vertical-align:-1px}
-.bottom{margin:35px 0 0;text-align:center;color:#667994;font-size:16px}
-.notice{display:none;margin:12px 0;color:#b63818;font-size:14px}
-@media(max-width:900px){.page{grid-template-columns:1fr}.visual{min-height:360px;padding:32px 28px}.visual-copy{margin-top:55px}.visual-copy h1{font-size:42px}.visual-copy p{font-size:16px}.form-side{min-height:auto;padding:42px 24px 56px}.home{margin-bottom:28px}.form-wrap{max-width:590px}}
-@media(max-width:480px){.visual{min-height:320px}.brand{font-size:22px}.brand-mark{font-size:40px}.visual-copy{margin-top:45px}.visual-copy h1{font-size:36px}.form-side{padding:32px 20px 42px}.subtitle{font-size:16px}.google,.field input,.primary{height:58px}.options{font-size:14px}}
+    <meta charset="utf-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>Forgot Password | HI-POWER</title>
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Manrope', 'sans-serif'] },
+                    colors: { brand: { blue: '#ff5722', red: '#ed4817', dark: '#080f17' } }
+                }
+            }
+        }
+    </script>
+    <style>
+        * { font-family: 'Manrope', sans-serif; }
+        .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
 
-a.google,a.google:hover{text-decoration:none}
-.alert{margin:12px 0;padding:10px 14px;border-radius:10px;font-size:14px;font-weight:600}
-.alert.err{background:#fef2f2;color:#dc2626;border:1px solid #fecaca}
-.alert.ok{background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0}
-.notice{margin:8px 0 12px}.notice:empty{display:none}
-.turnstile{display:flex;justify-content:center;margin:6px 0 24px}
-</style>
-<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+        @keyframes slide-up { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes gradient-shift { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+        .anim-slide-up { animation: slide-up 0.6s ease-out both; }
+        .anim-slide-up-1 { animation-delay: 0.1s; }
+        .anim-slide-up-2 { animation-delay: 0.2s; }
+        .anim-slide-up-3 { animation-delay: 0.3s; }
+        .anim-slide-up-4 { animation-delay: 0.4s; }
+        .anim-gradient { background-size: 200% 200%; animation: gradient-shift 8s ease infinite; }
+        .court-grid { background-image: linear-gradient(rgba(255,255,255,0.07) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.07) 1px, transparent 1px); background-size: 40px 40px; }
+
+        .input-group input:focus ~ label,
+        .input-group input:not(:placeholder-shown) ~ label,
+        .input-group input.filled ~ label,
+        .input-group input:-webkit-autofill ~ label { transform: translateY(-1.85rem) scale(0.85); color: #ff5722; }
+        .input-group label { transition: all 0.2s ease; pointer-events: none; }
+
+        @keyframes on-autofill-fill { from { } to { } }
+        .input-group input:-webkit-autofill,
+        .input-group input:-webkit-autofill:hover,
+        .input-group input:-webkit-autofill:focus {
+            -webkit-text-fill-color: #111827;
+            -webkit-box-shadow: 0 0 0 1000px #f8fafc inset;
+            caret-color: #111827;
+            transition: background-color 9999s ease-in-out 0s;
+        }
+        .input-group input:-webkit-autofill { animation: on-autofill-fill 0.01s; }
+
+        .btn-primary { background: linear-gradient(135deg, #ff5722, #ff7a50); transition: all 0.3s ease; }
+        .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 25px -5px rgba(255,87,34,0.4); }
+        .btn-primary:active { transform: translateY(0); }
+
+        .form-input { transition: all 0.2s ease; border: 1.5px solid #e2e8f0; }
+        .form-input:focus { border-color: #ff5722; box-shadow: 0 0 0 3px rgba(255,87,34,0.1); outline: none; }
+    </style>
 </head>
-<body>
-<main class="page">
-  <section class="visual" aria-label="Hi-Power badminton court">
-    <div class="brand"><span class="brand-mark">H</span><span>HI-POWER<small>BADMINTON COURT</small></span></div>
-    <div class="visual-copy">
-      <h1>No worries, <span>we've got you.</span></h1>
-      <p>We'll send a verification code to your registered email so you can reset your password in seconds. The code expires in 15 minutes.</p>
-    </div>
-  </section>
-  <section class="form-side">
-    <div class="corner-bottom"></div>
-    <div class="form-wrap">
-      <a class="home" href="/authentication/login">← <span>Back to login</span></a>
-      <h2>Forgot password?</h2>
-      <p class="subtitle">Enter your email and we'll send you a 6-digit reset code.</p>
-      <?php if (!empty($error_message)): ?>
-        <div class="alert err" role="alert"><?php echo htmlspecialchars($error_message); ?></div>
-      <?php endif; ?>
-      <form id="forgotForm" method="POST" action="forgot_password">
-        <?php echo get_csrf_input(); ?>
-        <div class="field"><span class="field-icon">✉</span><input type="email" id="email" name="email" placeholder="Email address" autocomplete="email" required aria-label="Email address"></div>
-        <div class="turnstile"><div class="cf-turnstile" data-sitekey="0x4AAAAAADg0SdY7FAjShZ-i" data-theme="light"></div></div>
-        <button class="primary" type="submit">Send Reset Code <span>→</span></button>
-      </form>
-      <p class="bottom">Remember your password? <a href="/authentication/login">Sign in</a></p>
-    </div>
-  </section>
-</main>
+<body class="bg-white min-h-screen">
+<div class="flex min-h-screen">
 
+    <!-- Left Branding Panel -->
+    <div class="hidden lg:flex lg:w-[55%] relative overflow-hidden bg-gradient-to-br from-brand-dark via-[#101c29] to-[#080f17] anim-gradient" style="background-size: 200% 200%;">
+        <div class="court-grid absolute inset-0"></div>
+
+        <div class="relative z-10 flex flex-col justify-center px-16 xl:px-20 max-w-2xl">
+            <div class="anim-slide-up anim-slide-up-1">
+                <div class="flex items-center gap-3 mb-8">
+                    <img src="/img/logo.png" alt="Logo" class="w-12 h-12 rounded-xl shadow-lg shadow-black/20">
+                    <div>
+                        <span class="text-xl font-extrabold text-white tracking-tight">HI-POWER</span>
+                    </div>
+                </div>
+            </div>
+
+            <h1 class="text-4xl xl:text-5xl font-extrabold text-white leading-tight mb-6 anim-slide-up anim-slide-up-2">
+                No worries,<br>
+                <span class="bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">we've got you.</span>
+            </h1>
+
+            <p class="text-lg text-blue-100/70 leading-relaxed mb-10 max-w-md anim-slide-up anim-slide-up-3">
+                We'll send a verification code to your registered email so you can reset your password in seconds.
+            </p>
+
+            <div class="flex gap-6 anim-slide-up anim-slide-up-4">
+                <div class="flex items-center gap-2 text-blue-100/50 text-sm">
+                    <span class="material-symbols-outlined text-blue-400 text-lg">timer</span>
+                    15 min expiry
+                </div>
+                <div class="flex items-center gap-2 text-blue-100/50 text-sm">
+                    <span class="material-symbols-outlined text-blue-400 text-lg">verified</span>
+                    Secure code
+                </div>
+            </div>
+        </div>
+
+        <div class="absolute bottom-0 left-0 right-0 h-32 bg-gradient-to-t from-brand-dark/50 to-transparent"></div>
+    </div>
+
+    <!-- Right Form Panel -->
+    <div class="w-full lg:w-[45%] flex items-center justify-center p-6 sm:p-8 lg:p-12 bg-white">
+        <div class="w-full max-w-[420px]">
+
+            <div class="lg:hidden flex items-center gap-2 mb-8 anim-slide-up anim-slide-up-1">
+                <img src="/img/logo.png" alt="Logo" class="w-10 h-10 rounded-xl">
+                <span class="text-lg font-extrabold text-[#ff5722]">HI-POWER</span>
+            </div>
+
+            <a href="/authentication/login" class="inline-flex items-center gap-1.5 text-sm text-gray-400 hover:text-brand-blue transition-colors mb-6 group anim-slide-up anim-slide-up-1">
+                <span class="material-symbols-outlined text-[18px] transition-transform group-hover:-translate-x-1">arrow_back</span>
+                Back to login
+            </a>
+
+            <div class="anim-slide-up anim-slide-up-2">
+                <div class="w-14 h-14 rounded-2xl bg-brand-blue/10 flex items-center justify-center mb-6">
+                    <span class="material-symbols-outlined text-brand-blue text-[28px]">mail</span>
+                </div>
+                <h2 class="text-2xl sm:text-3xl font-bold text-gray-900 mb-2">Forgot password?</h2>
+                <p class="text-gray-400 text-[15px] mb-8">Enter your email and we'll send you a 6-digit reset code</p>
+            </div>
+
+            <?php if ($error_message): ?>
+                <div class="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl flex items-center gap-3 anim-slide-up anim-slide-up-2">
+                    <div class="w-8 h-8 rounded-full bg-red-100 flex items-center justify-center shrink-0">
+                        <span class="material-symbols-outlined text-red-600 text-lg">error</span>
+                    </div>
+                    <p class="text-sm text-red-600 font-medium"><?php echo htmlspecialchars($error_message); ?></p>
+                </div>
+            <?php endif; ?>
+
+            <form class="space-y-5" method="POST" action="forgot_password">
+                    <?php echo get_csrf_input(); ?>
+                <div class="input-group relative anim-slide-up anim-slide-up-3">
+                    <input class="form-input w-full h-12 px-4 rounded-xl bg-gray-50/80 text-sm font-medium text-gray-900" id="email" name="email" placeholder=" " required type="email"/>
+                    <label class="absolute left-4 top-3 text-sm text-gray-400 font-medium" for="email">Email address</label>
+                </div>
+
+                <div class="flex justify-center py-1 anim-slide-up anim-slide-up-3">
+                    <div class="cf-turnstile" data-sitekey="0x4AAAAAADg0SdY7FAjShZ-i" data-theme="light"></div>
+                </div>
+
+                <button class="btn-primary w-full h-12 rounded-xl text-white text-sm font-bold tracking-wide flex items-center justify-center gap-2 anim-slide-up anim-slide-up-4" type="submit">
+                    Send Reset Code
+                    <span class="material-symbols-outlined text-[18px]">send</span>
+                </button>
+            </form>
+
+            <p class="text-center text-sm text-gray-400 mt-8 anim-slide-up anim-slide-up-4">
+                Remember your password? <a href="/authentication/login" class="font-bold text-brand-blue hover:text-blue-700 transition-colors">Sign in</a>
+            </p>
+        </div>
+    </div>
+</div>
+
+<script>
+    function syncFloatingLabels() {
+        document.querySelectorAll('.input-group input').forEach(function(inp) {
+            inp.classList.toggle('filled', inp.value.trim() !== '');
+        });
+    }
+    document.querySelectorAll('.input-group input').forEach(function(inp) {
+        inp.addEventListener('input', syncFloatingLabels);
+        inp.addEventListener('focus', syncFloatingLabels);
+    });
+    window.addEventListener('DOMContentLoaded', syncFloatingLabels);
+    window.addEventListener('load', syncFloatingLabels);
+</script>
 </body>
 </html>

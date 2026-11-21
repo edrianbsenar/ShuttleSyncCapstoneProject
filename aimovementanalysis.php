@@ -58,7 +58,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             throw new Exception("Only JPG, PNG, or WEBP images are supported.");
         }
 
-        $shot_type = $_POST['shot_type'] ?? 'General Play';
+        // The movement is chosen by the user - only accept known movements.
+        $allowed_shots = ['Smash', 'Serve', 'Cross Drop', 'Net Play', 'General Play'];
+        $shot_type = $_POST['shot_type'] ?? 'Smash';
+        if (!in_array($shot_type, $allowed_shots, true)) {
+            throw new Exception("Please select a valid movement before analyzing.");
+        }
         
         // Save uploaded file to temp
         $tmp_dir = sys_get_temp_dir() . '/shuttlesync_ai';
@@ -766,7 +771,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     </section>
 
     <section class="ai-panel">
-        <label class="ai-label" for="shotSelection">Shot Type</label>
+        <label class="ai-label" for="shotSelection">Movement to Analyze</label>
         <select id="shotSelection" class="ai-select">
             <option value="Smash">Jump Smash</option>
             <option value="Serve">Short / Flick Serve</option>
@@ -838,7 +843,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 </div>
                 <div>
                     <h2>Performance Score</h2>
-                    <p>Your form will be auto-detected and scored against the <b id="refShotName">Jump Smash</b>.</p>
+                    <p>Your form will be scored against the movement you selected: <b id="refShotName">Jump Smash</b>.</p>
                     <div class="ai-similarity">
                         <span>Reference match</span>
                         <div class="ai-simbar"><span id="similarityBar"></span></div>
@@ -883,7 +888,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 <div class="ai-feedback">
                     <h3>Coach Feedback</h3>
                     <div id="aiFeedbackText" class="ai-feedback-body">
-                        <p class="ai-feedback-text">Upload an image of your stroke. The AI will auto-detect your shot type and score it against professional form.</p>
+                        <p class="ai-feedback-text">Choose your movement, then upload an image of it. The AI will score it against professional form for the movement you selected.</p>
                     </div>
                 </div>
             </div>
@@ -1319,14 +1324,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 const detConf = data.data.detection_confidence || 0;
                 const shotLabels = {"Smash":"Jump Smash","Serve":"Short / Flick Serve","Cross Drop":"Cross Court Drop","Net Play":"Net Kill / Spin","General Play":"General Footwork Base"};
 
-                // Auto-switch dropdown to detected type
-                const shotSelect = document.getElementById('shotSelection');
-                if (shotSelect) {
-                    for (let opt of shotSelect.options) {
-                        if (opt.value === detectedType) { opt.selected = true; break; }
-                    }
-                    updateRefSkeleton();
-                }
+                // The dropdown is left as the user set it - the selected movement is what was scored.
+                const isUserPicked = (data.data.shot_type_source || 'user') === 'user';
 
                 // Similarity score
                 const sim = data.data.similarity_score || 0;
@@ -1372,8 +1371,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
                 aiFeedbackText.innerHTML = `
                     <div class="ai-detected">
-                        <span class="ai-detected-label">Detected Stroke</span>
-                        <p class="ai-detected-name">${shotLabels[detectedType] || detectedType} <small>(${detConf}% confidence)</small></p>
+                        <span class="ai-detected-label">${isUserPicked ? 'Analyzed Movement' : 'Detected Stroke'}</span>
+                        <p class="ai-detected-name">${shotLabels[detectedType] || detectedType}${isUserPicked ? '' : ` <small>(${detConf}% confidence)</small>`}</p>
                     </div>
                     <p class="ai-feedback-text">${data.data.feedback}</p>
                 `;

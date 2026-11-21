@@ -108,7 +108,7 @@ if (isset($pdo)) {
 
         <!-- Brand -->
         <a href="/" class="flex items-center gap-2.5 shrink-0" aria-label="HI-POWER Badminton Court home">
-            <i class="fa-solid fa-bolt text-[#ff5722] text-3xl" style="transform:skew(-12deg);" aria-hidden="true"></i>
+            <img src="/img/logo.png" alt="HI-POWER logo" class="h-10 w-10 object-contain shrink-0" loading="eager">
             <span class="leading-none">
                 <strong class="block text-[17px] font-extrabold tracking-tight text-white">HI-POWER</strong>
                 <small class="block text-[6px] font-bold tracking-[2px] text-white/70 mt-1">BADMINTON COURT</small>

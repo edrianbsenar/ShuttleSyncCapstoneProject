@@ -1,10 +1,12 @@
-<?php
+﻿<?php
 require_once __DIR__ . '/../includes/session_boot.php';
 
 if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) { header("Location: /authentication/login"); exit; }
 if ($_SESSION['role'] !== 'Admin' && $_SESSION['role'] !== 'Head Manager') { header("Location: ../playerdashboard.php"); exit; }
 
 require_once __DIR__ . '/../includes/database_connect.php';
+require_once __DIR__ . '/../includes/inventory_helper.php';
+
 $admin_name = $_SESSION['full_name'];
 $admin_role = $_SESSION['role'];
 
@@ -25,6 +27,7 @@ $pending_payments = 0;
 try { $pending_payments = $pdo->query("SELECT COUNT(*) FROM payments WHERE status = 'Pending Payment'")->fetchColumn() ?? 0; } catch (PDOException $e) {}
 $pending_refunds = 0;
 try { $pending_refunds = $pdo->query("SELECT COUNT(*) FROM refunds WHERE status = 'Pending'")->fetchColumn() ?? 0; } catch (PDOException $e) {}
+$low_stock_count = low_stock_count($pdo);
 
 $courts = $pdo->query("SELECT court_id, name, status FROM Courts ORDER BY court_id ASC")->fetchAll();
 
@@ -45,6 +48,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
     fputcsv($out, ['Pending bookings', $pending_bookings]);
     fputcsv($out, ['Pending payments', $pending_payments]);
     fputcsv($out, ['Pending refunds', $pending_refunds]);
+    fputcsv($out, ['Low stock products', $low_stock_count]);
     fclose($out);
     exit;
 }
@@ -129,7 +133,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
     </div>
 
     <!-- Pending Actions (TC-AS-043) -->
-    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         <a href="user_bookings.php" class="bg-white rounded-2xl border border-outline-variant/30 shadow-sm p-4 flex items-center gap-4 hover:shadow-md transition-shadow">
             <div class="w-11 h-11 rounded-xl bg-emerald-50 flex items-center justify-center shrink-0">
                 <span class="material-symbols-outlined text-emerald-600">event_available</span>
@@ -157,6 +161,15 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
                 <p class="text-xl font-bold text-on-surface"><?php echo number_format($pending_refunds); ?></p>
             </div>
         </a>
+        <a href="inventory.php" class="bg-white rounded-2xl border border-outline-variant/30 shadow-sm p-4 flex items-center gap-4 hover:shadow-md transition-shadow <?php echo $low_stock_count > 0 ? 'ring-1 ring-amber-300' : ''; ?>">
+            <div class="w-11 h-11 rounded-xl <?php echo $low_stock_count > 0 ? 'bg-red-50' : 'bg-emerald-50'; ?> flex items-center justify-center shrink-0">
+                <span class="material-symbols-outlined <?php echo $low_stock_count > 0 ? 'text-red-600' : 'text-emerald-600'; ?>">warning</span>
+            </div>
+            <div class="min-w-0">
+                <p class="text-[11px] font-bold text-outline uppercase tracking-widest">Low Stock Alerts</p>
+                <p class="text-xl font-bold <?php echo $low_stock_count > 0 ? 'text-red-600' : 'text-on-surface'; ?>"><?php echo number_format($low_stock_count); ?></p>
+            </div>
+        </a>
     </div>
 
     <!-- Court Status + AI Lab -->
@@ -181,7 +194,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
                 ?>
                 <div class="p-4 rounded-xl border border-outline-variant/30 hover:border-primary/30 hover:shadow-sm transition-all bg-surface">
                     <div class="flex items-center justify-between mb-2">
-                        <span class="text-sm font-bold text-on-surface truncate"><?php echo htmlspecialchars($court['name']); ?></span>
+                        <span class="text-sm font-bold text-on-surface truncate"><?php echo htmlspecialchars(preg_replace('/\s*[-–]\s*(Standard|Premium)\s*$/i', '', $court['name'])); ?></span>
                         <div class="w-2.5 h-2.5 rounded-full <?php echo $dot; ?> shrink-0"></div>
                     </div>
                     <span class="inline-flex text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full <?php echo $label; ?>"><?php echo htmlspecialchars($court['status']); ?></span>
@@ -323,14 +336,6 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
             </div>
         </section>
     </div>
-
-    <footer class="mt-8 pt-6 border-t border-outline-variant/30 flex justify-between text-[11px] font-bold tracking-widest text-outline uppercase pb-8">
-        <p>&copy; 2024 HI-POWER</p>
-        <div class="flex gap-4">
-            <a class="hover:text-primary transition-colors" href="analytics.php">Status</a>
-            <a class="hover:text-primary transition-colors" href="/support.php?tab=contact">Support</a>
-        </div>
-    </footer>
 </main>
 
 </body>

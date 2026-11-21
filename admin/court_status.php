@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 // Start session
 require_once __DIR__ . '/../includes/session_boot.php';
 
@@ -42,6 +42,11 @@ try {
     // Editable hourly rate (defaults to the old fixed rate of 300).
     if (!$pdo->query("SHOW COLUMNS FROM Courts LIKE 'price_per_hour'")->fetch()) {
         $pdo->exec("ALTER TABLE Courts ADD COLUMN price_per_hour DECIMAL(10,2) NOT NULL DEFAULT 300.00");
+    }
+    // Court type (Standard/Premium) - editable by admin; backfill legacy rule on first add only.
+    if (!$pdo->query("SHOW COLUMNS FROM Courts LIKE 'court_type'")->fetch()) {
+        $pdo->exec("ALTER TABLE Courts ADD COLUMN court_type VARCHAR(20) NOT NULL DEFAULT 'Premium'");
+        $pdo->exec("UPDATE Courts SET court_type = 'Standard' WHERE court_id IN (3,4)");
     }
     // Photos shown in the court-booking "view" popup.
     $pdo->exec("CREATE TABLE IF NOT EXISTS court_images (
@@ -158,6 +163,25 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
         }
     }
 
+    // --- UPDATE COURT TYPE ---
+    if ($_POST['action'] == 'update_court_type') {
+        $court_id = (int)($_POST['court_id'] ?? 0);
+        $reopen_court = $court_id;
+        $court_type = trim($_POST['court_type'] ?? '');
+        if ($court_id <= 0) {
+            $error_message = "Invalid court.";
+        } elseif (!in_array($court_type, ['Standard', 'Premium'], true)) {
+            $error_message = "Please choose Standard or Premium.";
+        } else {
+            try {
+                $pdo->prepare("UPDATE Courts SET court_type = ? WHERE court_id = ?")->execute([$court_type, $court_id]);
+                $success_message = "Court type updated to " . $court_type . ".";
+            } catch (PDOException $e) {
+                $error_message = "Could not update the court type. Please try again.";
+            }
+        }
+    }
+
     // --- UPLOAD COURT PHOTOS ---
     if ($_POST['action'] == 'upload_court_images') {
         $court_id = (int)($_POST['court_id'] ?? 0);
@@ -171,8 +195,17 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
             if (empty($_FILES['images']) || !is_array($_FILES['images']['name'])) {
                 throw new Exception("Please choose at least one photo.");
             }
-            if (!is_dir($court_img_dir) && !@mkdir($court_img_dir, 0755, true)) {
-                throw new Exception("The photo folder (/img/courts) could not be created. Check folder permissions.");
+            if (!is_dir($court_img_dir)) {
+                if (!@mkdir($court_img_dir, 0775, true)) {
+                    throw new Exception("The photo folder (/img/courts) could not be created. Check folder permissions.");
+                }
+                @chmod($court_img_dir, 0775);
+            } elseif (!is_writable($court_img_dir)) {
+                // Folder exists but not writable — try to fix it on the fly
+                @chmod($court_img_dir, 0775);
+                if (!is_writable($court_img_dir)) {
+                    throw new Exception("The photo folder (/img/courts) is not writable. Run: chmod 775 " . $court_img_dir);
+                }
             }
 
             $cntStmt = $pdo->prepare("SELECT COUNT(*), COALESCE(MAX(sort_order), 0) FROM court_images WHERE court_id = ?");
@@ -241,14 +274,29 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
 // FETCH COURT DATA & SCHEDULES
 // ==========================================
 try {
-    $courts = $pdo->query("SELECT court_id, name, status, maintenance_notes, maintenance_start, maintenance_end, price_per_hour FROM Courts ORDER BY court_id ASC")->fetchAll();
+    $courts = $pdo->query("SELECT court_id, name, status, maintenance_notes, maintenance_start, maintenance_end, price_per_hour, court_type FROM Courts ORDER BY court_id ASC")->fetchAll();
 } catch (PDOException $e) {
     try {
-        $courts = $pdo->query("SELECT court_id, name, status, maintenance_notes, price_per_hour FROM Courts ORDER BY court_id ASC")->fetchAll();
+        $courts = $pdo->query("SELECT court_id, name, status, maintenance_notes, maintenance_start, maintenance_end, price_per_hour FROM Courts ORDER BY court_id ASC")->fetchAll();
     } catch (PDOException $e2) {
-        $courts = $pdo->query("SELECT court_id, name, status, maintenance_notes FROM Courts ORDER BY court_id ASC")->fetchAll();
+        try {
+            $courts = $pdo->query("SELECT court_id, name, status, maintenance_notes, price_per_hour, court_type FROM Courts ORDER BY court_id ASC")->fetchAll();
+        } catch (PDOException $e3) {
+            try {
+                $courts = $pdo->query("SELECT court_id, name, status, maintenance_notes, price_per_hour FROM Courts ORDER BY court_id ASC")->fetchAll();
+            } catch (PDOException $e4) {
+                $courts = $pdo->query("SELECT court_id, name, status, maintenance_notes FROM Courts ORDER BY court_id ASC")->fetchAll();
+            }
+        }
     }
 }
+// Ensure court_type is available for display/editing (fallback to legacy rule).
+foreach ($courts as &$__c) {
+    if (empty($__c['court_type'])) {
+        $__c['court_type'] = ((int)$__c['court_id'] === 3 || (int)$__c['court_id'] === 4) ? 'Standard' : 'Premium';
+    }
+}
+unset($__c);
 
 // Photos per court (for the card badges, the eye popup and the manage popup).
 $court_images = [];
@@ -262,9 +310,11 @@ $court_js = [];
 foreach ($courts as $c) {
     $cid = (int)$c['court_id'];
     $p = (float)($c['price_per_hour'] ?? 300);
+    $ctype = $c['court_type'] ?? (($cid === 3 || $cid === 4) ? 'Standard' : 'Premium');
     $court_js[$cid] = [
         'name'   => $c['name'],
         'price'  => $p > 0 ? $p : 300.0,
+        'type'   => $ctype,
         'images' => $court_images[$cid] ?? [],
     ];
 }
@@ -322,8 +372,8 @@ foreach ($courts as $c) {
             <input type="hidden" name="new_status" id="status_new_status" value="Maintenance">
 
             <div class="flex items-center gap-3">
-                <div class="w-10 h-10 rounded-xl bg-[accent]/10 flex items-center justify-center">
-                    <span class="material-symbols-outlined text-[accent]">build</span>
+                <div class="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center">
+                    <span class="material-symbols-outlined text-accent">build</span>
                 </div>
                 <div>
                     <h3 class="font-bold text-on-surface" id="courtModalTitle">Set Court to Maintenance</h3>
@@ -348,13 +398,13 @@ foreach ($courts as $c) {
             </div>
 
             <label id="overrideRow" class="hidden items-start gap-2.5 p-3 bg-amber-50 border border-amber-200 rounded-xl cursor-pointer">
-                <input type="checkbox" name="override_bookings" id="status_override" value="1" class="mt-0.5 w-4 h-4 rounded border-gray-300 text-[accent] focus:ring-[accent]/20">
+                <input type="checkbox" name="override_bookings" id="status_override" value="1" class="mt-0.5 w-4 h-4 rounded border-gray-300 text-accent focus:ring-accent/20">
                 <span class="text-xs text-amber-800 leading-snug">This court has active bookings. <strong>Override &amp; cancel</strong> any booking that overlaps the maintenance window.</span>
             </label>
 
             <div class="flex gap-3 pt-1">
                 <button type="button" onclick="closeCourtModal()" class="flex-1 h-11 bg-surface border border-outline-variant/60 text-on-surface rounded-xl font-bold text-sm hover:bg-surface-container-high transition-all">Cancel</button>
-                <button type="submit" class="flex-1 h-11 bg-[accent] text-white rounded-xl font-bold text-sm hover:bg-[#d13a23] transition-all">Save</button>
+                <button type="submit" class="flex-1 h-11 bg-accent text-white rounded-xl font-bold text-sm hover:bg-[#d13a23] transition-all">Save</button>
             </div>
         </form>
     </div>
@@ -365,8 +415,8 @@ foreach ($courts as $c) {
     <div class="bg-white w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-2xl shadow-2xl" style="animation: modalIn .22s ease-out;">
         <div class="flex items-center justify-between gap-3 p-5 border-b border-outline-variant/20">
             <div class="flex items-center gap-3 min-w-0">
-                <div class="w-10 h-10 rounded-xl bg-[primary]/10 flex items-center justify-center shrink-0">
-                    <span class="material-symbols-outlined text-[primary]">photo_library</span>
+                <div class="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+                    <span class="material-symbols-outlined text-primary">photo_library</span>
                 </div>
                 <div class="min-w-0">
                     <h3 class="font-bold text-on-surface truncate" id="photoModalTitle">Court photos</h3>
@@ -382,7 +432,7 @@ foreach ($courts as $c) {
             <div id="photoEmpty" class="hidden text-center py-10 border border-dashed border-outline-variant/50 rounded-xl bg-surface">
                 <span class="material-symbols-outlined text-on-surface-variant/30 text-[40px] block mb-1">image_not_supported</span>
                 <p class="text-sm font-semibold text-on-surface-variant">No photos yet for this court.</p>
-                <button type="button" id="photoEmptyBtn" class="mt-3 px-4 py-2 bg-[primary] text-white rounded-xl text-sm font-bold hover:bg-[accent] transition-colors">Add photos</button>
+                <button type="button" id="photoEmptyBtn" class="mt-3 px-4 py-2 bg-primary text-white rounded-xl text-sm font-bold hover:bg-accent transition-colors">Add photos</button>
             </div>
         </div>
     </div>
@@ -393,8 +443,8 @@ foreach ($courts as $c) {
     <div class="bg-white w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-2xl shadow-2xl" style="animation: modalIn .22s ease-out;">
         <div class="flex items-center justify-between gap-3 p-5 border-b border-outline-variant/20 sticky top-0 bg-white z-10">
             <div class="flex items-center gap-3 min-w-0">
-                <div class="w-10 h-10 rounded-xl bg-[primary]/10 flex items-center justify-center shrink-0">
-                    <span class="material-symbols-outlined text-[primary]">tune</span>
+                <div class="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+                    <span class="material-symbols-outlined text-primary">tune</span>
                 </div>
                 <div class="min-w-0">
                     <h3 class="font-bold text-on-surface truncate" id="manageTitle">Edit court</h3>
@@ -419,9 +469,25 @@ foreach ($courts as $c) {
                         <input type="number" name="price_per_hour" id="price_input" step="0.01" min="1" max="100000" required
                                class="w-full h-11 pl-8 pr-3 bg-surface border border-outline-variant/60 rounded-xl text-sm font-bold outline-none focus:border-primary focus:ring-2 focus:ring-primary/20">
                     </div>
-                    <button type="submit" class="px-5 h-11 bg-[accent] text-white rounded-xl font-bold text-sm hover:bg-[#d13a23] transition-all">Save price</button>
+                    <button type="submit" class="px-5 h-11 bg-accent text-white rounded-xl font-bold text-sm hover:bg-[#d13a23] transition-all">Save price</button>
                 </div>
                 <p class="text-[11px] text-on-surface-variant/70">Applies to new bookings only. Existing bookings keep the price they were booked at.</p>
+            </form>
+
+            <!-- Court type -->
+            <form method="POST" action="court_status?date=<?php echo $view_date; ?>" class="space-y-2">
+                <?php echo get_csrf_input(); ?>
+                <input type="hidden" name="action" value="update_court_type">
+                <input type="hidden" name="court_id" id="type_court_id">
+                <label class="block text-xs font-bold text-on-surface-variant uppercase tracking-widest" for="type_input">Court type</label>
+                <div class="flex gap-3">
+                    <select name="court_type" id="type_input" required class="flex-1 h-11 px-3 bg-surface border border-outline-variant/60 rounded-xl text-sm font-bold outline-none focus:border-primary focus:ring-2 focus:ring-primary/20">
+                        <option value="Premium">Premium</option>
+                        <option value="Standard">Standard</option>
+                    </select>
+                    <button type="submit" class="px-5 h-11 bg-primary text-white rounded-xl font-bold text-sm hover:bg-accent transition-all">Save type</button>
+                </div>
+                <p class="text-[11px] text-on-surface-variant/70">Shown on the homepage and court booking page (Standard or Premium).</p>
             </form>
 
             <!-- Current photos -->
@@ -441,9 +507,9 @@ foreach ($courts as $c) {
                 <input type="hidden" name="court_id" id="upload_court_id">
                 <label class="block text-xs font-bold text-on-surface-variant uppercase tracking-widest" for="upload_input">Add photos</label>
                 <input type="file" name="images[]" id="upload_input" multiple required accept="image/jpeg,image/png,image/webp"
-                       class="block w-full text-sm text-on-surface-variant file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-[primary]/10 file:text-[primary] file:font-bold hover:file:bg-[primary]/20">
+                       class="block w-full text-sm text-on-surface-variant file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-primary/10 file:text-primary file:font-bold hover:file:bg-primary/20">
                 <p class="text-[11px] text-on-surface-variant/70">JPG, PNG or WebP · up to <?php echo (int)$max_img_mb; ?> MB each · max <?php echo (int)$max_imgs_court; ?> per court. These show in the eye popup on the court booking page.</p>
-                <button type="submit" class="w-full h-11 bg-[primary] text-white rounded-xl font-bold text-sm hover:bg-[accent] transition-all">
+                <button type="submit" class="w-full h-11 bg-primary text-white rounded-xl font-bold text-sm hover:bg-accent transition-all">
                     <span class="material-symbols-outlined text-[18px] align-middle mr-1">upload</span> Upload photos
                 </button>
             </form>
@@ -469,7 +535,7 @@ foreach ($courts as $c) {
             <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
                 <div>
                     <div class="flex items-center gap-3 mb-2">
-                        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-[primary] to-[primary]/80 flex items-center justify-center shadow-md shadow-[primary]/20">
+                        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-primary/80 flex items-center justify-center shadow-md shadow-[primary]/20">
                             <span class="material-symbols-outlined text-white text-[20px]" style="font-variation-settings:'FILL' 1;">stadium</span>
                         </div>
                         <div>
@@ -555,10 +621,10 @@ foreach ($courts as $c) {
             <!-- Occupied -->
             <div class="bg-white rounded-2xl border border-outline-variant/30 shadow-sm p-5 group hover:shadow-md transition-shadow">
                 <div class="flex items-center justify-between mb-3">
-                    <div class="w-10 h-10 rounded-xl bg-[primary]/5 flex items-center justify-center">
-                        <span class="material-symbols-outlined text-[primary] text-[20px]">schedule</span>
+                    <div class="w-10 h-10 rounded-xl bg-primary/5 flex items-center justify-center">
+                        <span class="material-symbols-outlined text-primary text-[20px]">schedule</span>
                     </div>
-                    <span class="text-[10px] font-bold uppercase tracking-widest text-[primary]">Active</span>
+                    <span class="text-[10px] font-bold uppercase tracking-widest text-primary">Active</span>
                 </div>
                 <p class="text-3xl font-extrabold text-on-surface tracking-tight"><?php echo str_pad($count_occupied, 2, '0', STR_PAD_LEFT); ?></p>
                 <p class="text-xs text-on-surface-variant mt-1">Currently in use</p>
@@ -567,10 +633,10 @@ foreach ($courts as $c) {
             <!-- Maintenance -->
             <div class="bg-white rounded-2xl border border-outline-variant/30 shadow-sm p-5 group hover:shadow-md transition-shadow">
                 <div class="flex items-center justify-between mb-3">
-                    <div class="w-10 h-10 rounded-xl bg-[accent]/5 flex items-center justify-center">
-                        <span class="material-symbols-outlined text-[accent] text-[20px]">build</span>
+                    <div class="w-10 h-10 rounded-xl bg-accent/5 flex items-center justify-center">
+                        <span class="material-symbols-outlined text-accent text-[20px]">build</span>
                     </div>
-                    <span class="text-[10px] font-bold uppercase tracking-widest text-[accent]">Down</span>
+                    <span class="text-[10px] font-bold uppercase tracking-widest text-accent">Down</span>
                 </div>
                 <p class="text-3xl font-extrabold text-on-surface tracking-tight"><?php echo str_pad($count_maintenance, 2, '0', STR_PAD_LEFT); ?></p>
                 <p class="text-xs text-on-surface-variant mt-1">Under maintenance</p>
@@ -595,7 +661,7 @@ foreach ($courts as $c) {
                     $card_icon = 'stadium';
                     $btn_text = 'Set Maintenance';
                     $btn_action = "setMaintenance($c_id, $booking_count)";
-                    $btn_class = 'bg-white border-outline-variant/40 text-on-surface-variant hover:border-[accent]/40 hover:text-[accent] hover:bg-[accent]/5';
+                    $btn_class = 'bg-white border-outline-variant/40 text-on-surface-variant hover:border-accent/40 hover:text-accent hover:bg-accent/5';
                     $accent_bar = 'bg-emerald-500';
                 } elseif ($court['status'] == 'Maintenance') {
                     $status_color = 'red';
@@ -607,20 +673,20 @@ foreach ($courts as $c) {
                     $card_icon = 'handyman';
                     $btn_text = 'Mark Available';
                     $btn_action = "setAvailable($c_id)";
-                    $btn_class = 'bg-[accent] text-white hover:bg-[#d13a23] border-transparent shadow-sm shadow-[accent]/20';
-                    $accent_bar = 'bg-[accent]';
+                    $btn_class = 'bg-accent text-white hover:bg-[#d13a23] border-transparent shadow-sm shadow-[accent]/20';
+                    $accent_bar = 'bg-accent';
                 } else {
                     $status_color = 'blue';
-                    $status_bg = 'bg-[primary]/5';
-                    $status_text = 'text-[primary]';
-                    $status_border = 'border-[primary]/20';
-                    $icon_bg = 'bg-[primary]/5';
-                    $icon_color = 'text-[primary]';
+                    $status_bg = 'bg-primary/5';
+                    $status_text = 'text-primary';
+                    $status_border = 'border-primary/20';
+                    $icon_bg = 'bg-primary/5';
+                    $icon_color = 'text-primary';
                     $card_icon = 'sports_tennis';
                     $btn_text = 'Set Maintenance';
                     $btn_action = "setMaintenance($c_id, $booking_count)";
-                    $btn_class = 'bg-white border-outline-variant/40 text-on-surface-variant hover:border-[accent]/40 hover:text-[accent] hover:bg-[accent]/5';
-                    $accent_bar = 'bg-[primary]';
+                    $btn_class = 'bg-white border-outline-variant/40 text-on-surface-variant hover:border-accent/40 hover:text-accent hover:bg-accent/5';
+                    $accent_bar = 'bg-primary';
                 }
             ?>
             <div class="court-card bg-white rounded-2xl border border-outline-variant/30 shadow-sm overflow-hidden flex flex-col relative">
@@ -640,9 +706,9 @@ foreach ($courts as $c) {
                                 <?php endif; ?>
                             </div>
                             <div>
-                                <h3 class="font-bold text-on-surface text-[15px] leading-tight"><?php echo htmlspecialchars($court['name']); ?></h3>
-                                <p class="text-xs text-on-surface-variant mt-0.5">Court #<?php echo $c_id; ?></p>
-                                <p class="text-xs font-bold text-[primary] mt-0.5">
+                                <h3 class="font-bold text-on-surface text-[15px] leading-tight"><?php echo htmlspecialchars(preg_replace('/\s*[-–]\s*(Standard|Premium)\s*$/i', '', $court['name'])); ?></h3>
+                                <p class="text-xs text-on-surface-variant mt-0.5">Court #<?php echo $c_id; ?> · <span class="font-semibold text-on-surface"><?php echo htmlspecialchars($court_js[(int)$c_id]['type'] ?? $court['court_type'] ?? 'Premium'); ?></span></p>
+                                <p class="text-xs font-bold text-primary mt-0.5">
                                     ₱<?php echo number_format($court_js[(int)$c_id]['price'], $court_js[(int)$c_id]['price'] == floor($court_js[(int)$c_id]['price']) ? 0 : 2); ?>/hr
                                     <span class="text-on-surface-variant/60 font-medium"> · <?php $pc = count($court_js[(int)$c_id]['images']); echo $pc . ($pc === 1 ? ' photo' : ' photos'); ?></span>
                                 </p>
@@ -683,7 +749,7 @@ foreach ($courts as $c) {
                                     <span class="material-symbols-outlined text-on-surface-variant/60 text-[16px]">event_note</span>
                                     <p class="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">Today's Reservations</p>
                                 </div>
-                                <span class="text-[11px] font-bold <?php echo $booking_count > 0 ? 'text-[primary] bg-[primary]/5' : 'text-on-surface-variant/50 bg-surface-container'; ?> px-2 py-0.5 rounded-md"><?php echo $booking_count; ?> <?php echo $booking_count === 1 ? 'slot' : 'slots'; ?></span>
+                                <span class="text-[11px] font-bold <?php echo $booking_count > 0 ? 'text-primary bg-primary/5' : 'text-on-surface-variant/50 bg-surface-container'; ?> px-2 py-0.5 rounded-md"><?php echo $booking_count; ?> <?php echo $booking_count === 1 ? 'slot' : 'slots'; ?></span>
                             </div>
                             <div class="max-h-[160px] overflow-y-auto custom-scrollbar">
                                 <?php if(empty($current_bookings)): ?>
@@ -696,15 +762,15 @@ foreach ($courts as $c) {
                                         <?php foreach($current_bookings as $b): ?>
                                             <div class="booking-item px-3.5 py-2.5 flex items-center justify-between">
                                                 <div class="flex items-center gap-2.5 min-w-0">
-                                                    <div class="w-8 h-8 rounded-lg bg-[primary]/5 flex items-center justify-center shrink-0">
-                                                        <span class="material-symbols-outlined text-[primary] text-[14px]">schedule</span>
+                                                    <div class="w-8 h-8 rounded-lg bg-primary/5 flex items-center justify-center shrink-0">
+                                                        <span class="material-symbols-outlined text-primary text-[14px]">schedule</span>
                                                     </div>
                                                     <div class="min-w-0">
                                                         <p class="text-xs font-bold text-on-surface"><?php echo htmlspecialchars($b['full_name']); ?></p>
                                                     </div>
                                                 </div>
                                                 <div class="flex items-center gap-1.5 shrink-0 ml-2">
-                                                    <span class="text-[11px] font-bold text-[primary] bg-[primary]/5 px-2 py-0.5 rounded-md">
+                                                    <span class="text-[11px] font-bold text-primary bg-primary/5 px-2 py-0.5 rounded-md">
                                                         <?php echo date('H:i', strtotime($b['start_time'])); ?>
                                                     </span>
                                                     <span class="text-on-surface-variant/30 text-[10px]">-</span>
@@ -726,12 +792,12 @@ foreach ($courts as $c) {
                     <div class="flex gap-2">
                         <!-- Eye: preview the court photos -->
                         <button type="button" onclick="viewCourtPhotos(<?php echo (int)$c_id; ?>)" title="View court photos" aria-label="View photos of <?php echo htmlspecialchars($court['name']); ?>"
-                                class="w-11 h-[42px] shrink-0 flex items-center justify-center border border-outline-variant/40 rounded-xl bg-white text-on-surface-variant hover:border-[primary]/40 hover:text-[primary] hover:bg-[primary]/5 transition-all active:scale-[0.98]">
+                                class="w-11 h-[42px] shrink-0 flex items-center justify-center border border-outline-variant/40 rounded-xl bg-white text-on-surface-variant hover:border-primary/40 hover:text-primary hover:bg-primary/5 transition-all active:scale-[0.98]">
                             <span class="material-symbols-outlined text-[20px]">visibility</span>
                         </button>
                         <!-- Edit price + photos -->
                         <button type="button" onclick="manageCourt(<?php echo (int)$c_id; ?>)"
-                                class="flex-1 py-2.5 border border-outline-variant/40 rounded-xl text-sm font-bold bg-white text-on-surface-variant hover:border-[primary]/40 hover:text-[primary] hover:bg-[primary]/5 transition-all active:scale-[0.98]">
+                                class="flex-1 py-2.5 border border-outline-variant/40 rounded-xl text-sm font-bold bg-white text-on-surface-variant hover:border-primary/40 hover:text-primary hover:bg-primary/5 transition-all active:scale-[0.98]">
                             <span class="material-symbols-outlined text-[16px] align-middle mr-1.5">edit</span>
                             Price &amp; Photos
                         </button>
@@ -869,10 +935,12 @@ foreach ($courts as $c) {
     function manageCourt(id) {
         const c = courtData[id]; if (!c) return;
         document.getElementById('manageTitle').textContent = c.name;
-        document.getElementById('manageSub').textContent = 'Court #' + id;
+        document.getElementById('manageSub').textContent = 'Court #' + id + ' · ' + (c.type || 'Premium');
         document.getElementById('price_court_id').value = id;
+        document.getElementById('type_court_id').value = id;
         document.getElementById('upload_court_id').value = id;
         document.getElementById('price_input').value = Number(c.price).toFixed(2);
+        document.getElementById('type_input').value = c.type || 'Premium';
         document.getElementById('upload_input').value = '';
 
         const grid = document.getElementById('manageGrid');

@@ -7,8 +7,11 @@ CLI
     analysis_engine.py <image_path> <shot_type> [handedness]
 
     shot_type  : Smash | Serve | Cross Drop | Net Play | General Play | Auto
-                 A specific type is used as a prior for auto-detection (it wins
-                 close calls); "Auto" (or anything unrecognised) is pure detection.
+                 A specific type is LOCKED: the user's chosen movement is always
+                 the one scored (and the one whose reference skeleton is drawn).
+                 Detection still runs, but only to add an advisory warning when
+                 the pose looks clearly different. "Auto" (or anything
+                 unrecognised) falls back to pure detection.
     handedness : right | left | auto        (optional, default: auto)
 
 Output: a single JSON object on stdout (same schema as v1, plus extra fields).
@@ -1543,6 +1546,8 @@ class BadmintonAnalyzer:
                 "detected_skeleton": None,
                 "quality_score": quality_score, "quality_warnings": final_warnings,
                 "detected_shot_type": fallback_type, "detection_confidence": 0,
+                "shot_type_source": "user" if requested_shot in self.REFERENCE_POSES else "auto",
+                "suggested_shot_type": fallback_type,
                 "shot_type_scores": {}, "all_similarities": {},
                 "analysis_confidence": 0,
                 "requested_shot_type": requested_shot,
@@ -1589,18 +1594,32 @@ class BadmintonAnalyzer:
         all_similarities = {t: s["similarity"] for t, s in sims.items()}
 
         # ---- SHOT TYPE ----
-        detected_type, detection_confidence, type_scores = self.auto_detect_shot_type(
-            body, hand_metrics, all_similarities,
-            requested_shot if requested_shot in self.REFERENCE_POSES else None)
-        if requested_shot in self.REFERENCE_POSES and detected_type != requested_shot:
-            quality_warnings.append(
-                f"You selected {requested_shot}, but the pose looks more like {detected_type} "
-                f"({detection_confidence}% confidence), so it was scored as {detected_type}.")
-        ranked = sorted(type_scores.items(), key=lambda kv: -kv[1])
-        if {ranked[0][0], ranked[1][0]} == {"Smash", "Cross Drop"} and ranked[0][1] - ranked[1][1] < 8:
-            quality_warnings.append(
-                "Smash and Cross Drop look almost identical at this moment of the swing "
-                "(that's the point of the deception). Select the shot type for the most accurate scoring.")
+        # The user's selected movement is authoritative. Detection only runs
+        # to (a) pick a type when nothing was selected ("Auto") and (b) give a
+        # non-binding hint when the pose looks very different from the choice.
+        suggested_type, suggested_conf, type_scores = self.auto_detect_shot_type(
+            body, hand_metrics, all_similarities, None)
+        user_locked = requested_shot in self.REFERENCE_POSES
+        if user_locked:
+            detected_type = requested_shot
+            shot_source = "user"
+            detection_confidence = 100
+            sel_score = type_scores.get(requested_shot, 0)
+            sug_score = type_scores.get(suggested_type, 0)
+            if suggested_type != requested_shot and sug_score - sel_score >= 20 and suggested_conf >= 45:
+                quality_warnings.append(
+                    f"Scored as {requested_shot} as you selected. Heads up: this pose looks "
+                    f"more like {suggested_type}, so some scores may be low if this isn't "
+                    f"the moment of the {requested_shot}.")
+        else:
+            detected_type = suggested_type
+            shot_source = "auto"
+            detection_confidence = suggested_conf
+            ranked = sorted(type_scores.items(), key=lambda kv: -kv[1])
+            if {ranked[0][0], ranked[1][0]} == {"Smash", "Cross Drop"} and ranked[0][1] - ranked[1][1] < 8:
+                quality_warnings.append(
+                    "Smash and Cross Drop look almost identical at this moment of the swing "
+                    "(that's the point of the deception). Select the shot type for the most accurate scoring.")
 
         analysis = self.score_shot(detected_type, body, hand_metrics)
         sc = analysis.pop("_scorecard")
@@ -1632,6 +1651,8 @@ class BadmintonAnalyzer:
             "quality_warnings": quality_warnings,
             "detected_shot_type": detected_type,
             "detection_confidence": detection_confidence,
+            "shot_type_source": shot_source,
+            "suggested_shot_type": suggested_type,
             "shot_type_scores": type_scores,
             "all_similarities": all_similarities,
             "analysis_confidence": analysis_conf,

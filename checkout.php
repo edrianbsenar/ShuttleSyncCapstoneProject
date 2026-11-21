@@ -4,8 +4,12 @@ require_once __DIR__ . '/includes/config.php';
 require_once __DIR__ . '/includes/database_connect.php';
 require_once __DIR__ . '/includes/csrf_helper.php';
 require_once __DIR__ . '/includes/bank_details.php';
+require_once __DIR__ . '/includes/inventory_helper.php';
 
 Config::load();
+
+// Prepare the stock-tracking flag before any transaction is opened.
+inventory_ensure_schema($pdo);
 
 if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
     header("Location: /authentication/login");
@@ -26,6 +30,13 @@ $cart_ids      = array_values(array_filter(array_map('intval', $pending['cart_id
 $booking_ids   = array_values(array_filter(array_map('intval', $pending['booking_ids'] ?? [])));
 $has_shop      = in_array($type, ['checkout_shop', 'checkout_both']);
 $has_bookings  = in_array($type, ['checkout_booking', 'checkout_both']);
+
+// In Cart holds expire after 5 minutes. Pending Payment (receipt submitted) stays for admin verification.
+$has_created_col = false;
+try { $has_created_col = (bool)$pdo->query("SHOW COLUMNS FROM Bookings LIKE 'created_at'")->fetch(); } catch (PDOException $e) {}
+if ($has_created_col) {
+    try { $pdo->prepare("UPDATE Bookings SET status = 'Expired' WHERE user_id = ? AND status = 'In Cart' AND created_at < (NOW() - INTERVAL 5 MINUTE)")->execute([$user_id]); } catch (PDOException $e) {}
+}
 
 // ==========================================
 // FETCH selected shop lines (authoritative)
@@ -57,9 +68,12 @@ if ($has_shop && !empty($cart_ids)) {
 $booking_lines = [];
 if ($has_bookings && !empty($booking_ids)) {
     $place = implode(',', array_fill(0, count($booking_ids), '?'));
-    $stmt = $pdo->prepare("SELECT b.booking_id, b.booking_reference, b.booking_date, b.start_time, b.end_time, b.total_price, c.name AS court_name
+    $book_sql = "SELECT b.booking_id, b.booking_reference, b.booking_date, b.start_time, b.end_time, b.total_price, c.name AS court_name
                            FROM Bookings b JOIN Courts c ON b.court_id = c.court_id
-                           WHERE b.user_id = ? AND b.status = 'In Cart' AND b.booking_id IN ($place)");
+                           WHERE b.user_id = ? AND b.status = 'In Cart'";
+    if ($has_created_col) { $book_sql .= " AND b.created_at >= (NOW() - INTERVAL 5 MINUTE)"; }
+    $book_sql .= " AND b.booking_id IN ($place)";
+    $stmt = $pdo->prepare($book_sql);
     $stmt->execute(array_merge([$user_id], $booking_ids));
     $rows = $stmt->fetchAll();
     if (count($rows) !== count($booking_ids)) { invalidate_checkout($pdo); }
@@ -92,10 +106,8 @@ function invalidate_checkout($pdo): void {
 $subtotal_shop     = array_sum(array_column($shop_lines, 'amount'));
 $subtotal_booking  = array_sum(array_column($booking_lines, 'amount'));
 $subtotal          = round($subtotal_shop + $subtotal_booking, 2);
-$tax_rate          = (float)Config::get('PAYMENT_TAX_RATE', 0.08);
-$tax               = round($subtotal * $tax_rate, 2);
-$grand_total       = round($subtotal + $tax, 2);
-$shop_tax          = round($subtotal_shop * $tax_rate, 2);
+// Tax removed system-wide: no tax is added to shop orders or court bookings.
+$grand_total       = $subtotal;
 
 $banks      = bankAccountDetails();
 $pickup     = storePickupInfo();
@@ -141,10 +153,93 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    // ---------------------------------------------------------------
+    // SHOP -> PAY AT THE COUNTER
+    // Shop transactions are paid in person at the counter; no online
+    // receipt is collected. The order is created as 'Pending' and a
+    // matching 'Pending Payment' record lets staff confirm the cash and
+    // deduct stock the same way online payments are verified.
+    // ---------------------------------------------------------------
+    if ($post_action === 'submit_counter') {
+        if ($has_bookings) {
+            $errors[] = "This checkout includes a court booking. Please use the online payment step.";
+        }
+
+        $stock_issue = shop_stock_issue($pdo, $shop_lines);
+        if ($stock_issue !== null) {
+            $errors[] = $stock_issue;
+        }
+
+        if (empty($errors)) {
+            $ref = generatePaymentReference();
+            $pdo->beginTransaction();
+            try {
+                $counter_note = mb_substr(trim('Pay at Counter — ' . $notes), 0, 500);
+
+                // 1. Payment record (no receipt; represents cash due at pickup)
+                $ins = $pdo->prepare("INSERT INTO payments (payment_reference, user_id, total_amount, status, receipt_path, notes) VALUES (?, ?, ?, 'Pending Payment', '', ?)");
+                $ins->execute([$ref, $user_id, round($subtotal_shop, 2), $counter_note]);
+                $payment_id = (int)$pdo->lastInsertId();
+
+                // 2. Shop order (Pending until pickup / counter payment)
+                $order_number = 'ORD-' . date('Ymd') . '-' . strtoupper(substr(uniqid(), -6));
+                $ins_order = $pdo->prepare("INSERT INTO Orders (order_number, user_id, order_date, total_amount, status, payment_method, payment_reference, payment_id) VALUES (?, ?, CURRENT_DATE, ?, 'Pending', 'pay_at_counter', ?, ?)");
+                $ins_order->execute([$order_number, $user_id, round($subtotal_shop, 2), $ref, $payment_id]);
+                $order_id = (int)$pdo->lastInsertId();
+
+                // 3. Line items
+                $ins_item = $pdo->prepare("INSERT INTO payment_items (payment_id, item_type, product_id, order_id, quantity, amount, description) VALUES (?, 'shop', ?, ?, ?, ?, ?)");
+                foreach ($shop_lines as $line) {
+                    $desc = $line['name'] . (empty($line['customization']) ? '' : ' (' . $line['customization'] . ')');
+                    $ins_item->execute([$payment_id, $line['product_id'], $order_id, $line['quantity'], $line['amount'], $desc]);
+                }
+
+                // 4. Reserve stock now that the order exists. The flag on Orders
+                //    makes this a no-op if the payment is verified later.
+                if (deduct_stock_for_order($pdo, (int)$order_id) === HP_STOCK_DEDUCT_ERROR) {
+                    throw new RuntimeException('Could not reserve stock for this order.');
+                }
+
+                // 5. Clear shop cart items
+                if (!empty($cart_ids)) {
+                    $place = implode(',', array_fill(0, count($cart_ids), '?'));
+                    $pdo->prepare("DELETE FROM Cart_Items WHERE user_id = ? AND cart_item_id IN ($place)")->execute(array_merge([$user_id], $cart_ids));
+                }
+
+                $pdo->commit();
+                unset($_SESSION['pending_checkout']);
+
+                // Remember what this session/browser just created so it shows
+                // in "My Orders" immediately.
+                hp_remember_order((int)$order_id);
+
+                $success = [
+                    'mode'     => 'counter',
+                    'ref'      => $ref,
+                    'amount'   => round($subtotal_shop, 2),
+                    'receipt'  => null,
+                    'order_id' => $order_id,
+                ];
+            } catch (Exception $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                $errors[] = "Checkout failed: " . $e->getMessage();
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // COURT BOOKINGS (booking-only or shop + booking) -> ONLINE
+    // Only the booking total is paid online. If the cart also contains
+    // shop items, those are placed as a separate Pay-at-Counter order.
+    // ---------------------------------------------------------------
     if ($post_action === 'submit_payment') {
+        if (!$has_bookings) {
+            $errors[] = "There is no court booking to pay online. Shop orders are paid at the counter.";
+        }
+
         // ---- Validate receipt upload ----
         if (!isset($_FILES['receipt']) || $_FILES['receipt']['error'] !== UPLOAD_ERR_OK) {
-            $errors[] = "Please attach a screenshot of your bank transfer receipt.";
+            $errors[] = "Please attach a screenshot of your GCash/Maya payment receipt.";
         } else {
             $size = (int)$_FILES['receipt']['size'];
             if ($size <= 0 || $size > 5 * 1024 * 1024) {
@@ -154,6 +249,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!$img || !in_array($img['mime'], ['image/jpeg', 'image/png'])) {
                     $errors[] = "Receipt must be a valid JPG or PNG image.";
                 }
+            }
+        }
+
+        // Mixed checkout also places a shop order — check its stock too.
+        if (!empty($shop_lines)) {
+            $stock_issue = shop_stock_issue($pdo, $shop_lines);
+            if ($stock_issue !== null) {
+                $errors[] = $stock_issue;
             }
         }
 
@@ -170,34 +273,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 $pdo->beginTransaction();
                 try {
-                    // 1. Payment row
+                    $order_id    = null;
+                    $shop_ref    = null;
+                    $shop_amount = 0.0;
+
+                    // 1. Online payment row covers the court booking only.
                     $ins = $pdo->prepare("INSERT INTO payments (payment_reference, user_id, total_amount, status, receipt_path, notes) VALUES (?, ?, ?, 'Pending Payment', ?, ?)");
-                    $ins->execute([$ref, $user_id, $grand_total, '/uploads/receipts/' . $filename, $notes]);
+                    $ins->execute([$ref, $user_id, round($subtotal_booking, 2), '/uploads/receipts/' . $filename, $notes]);
                     $payment_id = (int)$pdo->lastInsertId();
-                    $order_id = null;
 
-                    // 2. Shop portion -> one Orders row + item lines
-                    if (!empty($shop_lines)) {
-                        $order_number = 'ORD-' . date('Ymd') . '-' . strtoupper(substr(uniqid(), -6));
-                        $order_total  = round($subtotal_shop + $shop_tax, 2);
-                        $ins_order = $pdo->prepare("INSERT INTO Orders (order_number, user_id, order_date, total_amount, status, payment_method, payment_reference, payment_id) VALUES (?, ?, CURRENT_DATE, ?, 'Pending Payment', 'bank_transfer', ?, ?)");
-                        $ins_order->execute([$order_number, $user_id, $order_total, $ref, $payment_id]);
-                        $order_id = (int)$pdo->lastInsertId();
-
-                        $ins_item = $pdo->prepare("INSERT INTO payment_items (payment_id, item_type, product_id, order_id, quantity, amount, description) VALUES (?, 'shop', ?, ?, ?, ?, ?)");
-                        foreach ($shop_lines as $line) {
-                            $desc = $line['name'] . (empty($line['customization']) ? '' : ' (' . $line['customization'] . ')');
-                            $ins_item->execute([$payment_id, $line['product_id'], $order_id, $line['quantity'], $line['amount'], $desc]);
-                        }
-                    }
-
-                    // 3. Booking portion -> move to Pending Payment + item lines
+                    // 2. Booking portion -> move to Pending Payment + item lines
                     $ins_item = $pdo->prepare("INSERT INTO payment_items (payment_id, item_type, booking_id, quantity, amount, description) VALUES (?, 'booking', ?, 1, ?, ?)");
                     foreach ($booking_lines as $line) {
                         $desc = $line['court_name'] . ' · ' . date('M d, Y', strtotime($line['booking_date'])) . ' ' . date('h:i A', strtotime($line['start_time'])) . '–' . date('h:i A', strtotime($line['end_time'])) . ' · ' . $line['booking_reference'];
                         $upd = $pdo->prepare("UPDATE Bookings SET status = 'Pending Payment', payment_id = ? WHERE booking_id = ? AND user_id = ? AND status = 'In Cart'");
                         $upd->execute([$payment_id, $line['booking_id'], $user_id]);
                         $ins_item->execute([$payment_id, $line['booking_id'], $line['amount'], $desc]);
+                    }
+
+                    // 3. Shop portion (if any) -> separate Pay-at-Counter order
+                    if (!empty($shop_lines)) {
+                        do { $shop_ref = generatePaymentReference(); } while ($shop_ref === $ref);
+                        $shop_amount = round($subtotal_shop, 2);
+                        $counter_note = mb_substr(trim('Pay at Counter — ' . $notes), 0, 500);
+
+                        $ins_shop = $pdo->prepare("INSERT INTO payments (payment_reference, user_id, total_amount, status, receipt_path, notes) VALUES (?, ?, ?, 'Pending Payment', '', ?)");
+                        $ins_shop->execute([$shop_ref, $user_id, $shop_amount, $counter_note]);
+                        $shop_payment_id = (int)$pdo->lastInsertId();
+
+                        $order_number = 'ORD-' . date('Ymd') . '-' . strtoupper(substr(uniqid(), -6));
+                        $ins_order = $pdo->prepare("INSERT INTO Orders (order_number, user_id, order_date, total_amount, status, payment_method, payment_reference, payment_id) VALUES (?, ?, CURRENT_DATE, ?, 'Pending', 'pay_at_counter', ?, ?)");
+                        $ins_order->execute([$order_number, $user_id, $shop_amount, $shop_ref, $shop_payment_id]);
+                        $order_id = (int)$pdo->lastInsertId();
+
+                        $ins_shop_item = $pdo->prepare("INSERT INTO payment_items (payment_id, item_type, product_id, order_id, quantity, amount, description) VALUES (?, 'shop', ?, ?, ?, ?, ?)");
+                        foreach ($shop_lines as $line) {
+                            $desc = $line['name'] . (empty($line['customization']) ? '' : ' (' . $line['customization'] . ')');
+                            $ins_shop_item->execute([$shop_payment_id, $line['product_id'], $order_id, $line['quantity'], $line['amount'], $desc]);
+                        }
+
+                        // Reserve stock for the shop portion of this checkout.
+                        if (deduct_stock_for_order($pdo, (int)$order_id) === HP_STOCK_DEDUCT_ERROR) {
+                            throw new RuntimeException('Could not reserve stock for this order.');
+                        }
                     }
 
                     // 4. Clear shop cart items
@@ -209,10 +327,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $pdo->commit();
                     unset($_SESSION['pending_checkout']);
 
+                    // Remember what this session/browser just created. The
+                    // customer dashboard includes these orders explicitly, so a
+                    // freshly placed order is visible in "My Orders" immediately.
+                    if (!empty($order_id)) {
+                        hp_remember_order((int)$order_id);
+                    }
+
                     $success = [
-                        'ref'      => $ref,
-                        'amount'   => $grand_total,
-                        'receipt'  => '/uploads/receipts/' . $filename,
+                        'mode'        => $shop_ref ? 'mixed' : 'online',
+                        'ref'         => $ref,
+                        'amount'      => round($subtotal_booking, 2),
+                        'receipt'     => '/uploads/receipts/' . $filename,
+                        'shop_ref'    => $shop_ref,
+                        'shop_amount' => $shop_amount,
+                        'order_id'    => $order_id,
                     ];
                 } catch (Exception $e) {
                     if ($pdo->inTransaction()) $pdo->rollBack();
@@ -234,15 +363,15 @@ $step = $success ? 'done' : $step;
 <head>
     <meta charset="utf-8"/>
     <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-    <title>Bank Transfer Checkout | HI-POWER</title>
+    <title><?php echo $has_bookings ? 'GCash &amp; Maya Checkout' : 'Pay at Counter Checkout'; ?> | HI-POWER</title>
     <?php include __DIR__ . '/includes/tailwind_config.php'; ?>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
     :root{
-      --navy:#08111d;--text:#142747;--muted:#7c90b0;--blue:#435bff;
-      --orange:#ff4d1c;--page:#f3f5f8;--border:#dfe6ef;--white:#fff;
+      --navy:#08111d;--text:#142747;--muted:#475569;--blue:#435bff;
+      --orange:#ff5722;--page:#f3f5f8;--border:#dfe6ef;--white:#fff;
       --shadow:0 10px 28px rgba(23,43,77,.06);
     }
     *{box-sizing:border-box}
@@ -254,8 +383,8 @@ $step = $success ? 'done' : $step;
     .back-btn{width:38px;height:38px;border:1px solid var(--border);border-radius:10px;background:#fff;color:#6e83a4;font-size:23px;display:grid;place-items:center;text-decoration:none;cursor:pointer}
     h1{margin:0;font-size:27px;line-height:1.25;letter-spacing:-.7px;font-weight:600}
     .steps{display:flex;align-items:center;gap:10px;margin:0 0 25px}
-    .step{display:flex;align-items:center;gap:8px;color:#7d91b0;font-size:12px;font-weight:500}
-    .step-number{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:#e6ebf2;color:#8193ad;font-weight:600}
+    .step{display:flex;align-items:center;gap:8px;color:#475569;font-size:12px;font-weight:500}
+    .step-number{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:#e6ebf2;color:#475569;font-weight:600}
     .step.active{color:#24375a}
     .step.active .step-number{background:var(--blue);color:#fff;box-shadow:0 4px 9px rgba(67,91,255,.2)}
     .step.done .step-number{background:var(--blue);color:#fff}
@@ -269,25 +398,25 @@ $step = $success ? 'done' : $step;
     .optional{font-size:11px;color:var(--muted);font-weight:400}
     .reservation{padding:14px;background:#f5f7fa;border:1px solid #e4eaf2;border-radius:11px;display:flex;align-items:center;justify-content:space-between;gap:15px;margin-bottom:10px}
     .reservation-name{font-size:13px;font-weight:600;margin:0 0 3px;color:#172b4b}
-    .reservation-time{font-size:11px;color:#7185a5;margin:0 0 4px}
-    .reservation-code{font-size:9px;color:#8da0bc;letter-spacing:.7px;margin:0}
+    .reservation-time{font-size:11px;color:#475569;margin:0 0 4px}
+    .reservation-code{font-size:10px;color:#475569;letter-spacing:.5px;margin:0;font-weight:600}
     .reservation-price{font-size:13px;font-weight:600;color:var(--orange);white-space:nowrap;align-self:flex-start}
-    .confirmation{border-top:1px solid #e9edf3;margin-top:13px;padding-top:12px;display:flex;align-items:flex-start;gap:9px;color:#7589a8;font-size:11px;line-height:1.65}
+    .confirmation{border-top:1px solid #e9edf3;margin-top:13px;padding-top:12px;display:flex;align-items:flex-start;gap:9px;color:#334155;font-size:11px;line-height:1.65}
     .confirmation input{margin:3px 0 0;accent-color:var(--blue);width:14px;height:14px;flex-shrink:0}
-    .summary-label{font-size:11px;letter-spacing:.7px;text-transform:uppercase;font-weight:600;margin:0 0 14px}
-    .summary-line{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:11px;color:#7c90b0;margin:0 0 10px}
+    .summary-label{font-size:11px;letter-spacing:.7px;text-transform:uppercase;font-weight:700;margin:0 0 14px;color:#142747}
+    .summary-line{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:11px;color:#475569;margin:0 0 10px}
     .summary-line strong{font-size:11px;color:#243754;font-weight:600;white-space:nowrap}
     .summary-divider{border:0;border-top:1px solid #e9edf3;margin:13px 0}
     .amount-due{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;font-weight:600}
     .amount-due strong{font-size:20px;color:var(--orange);white-space:nowrap}
     textarea{width:100%;min-height:88px;resize:vertical;background:#f5f7fa;border:1px solid var(--border);border-radius:11px;padding:12px 13px;color:var(--text);font-size:11px;line-height:1.7;outline:none}
     textarea:focus{border-color:#9aa6ff;box-shadow:0 0 0 3px rgba(67,91,255,.08)}
-    textarea::placeholder{color:#8295b2}
+    textarea::placeholder{color:#64748b}
     .notes-heading{display:flex;justify-content:space-between;align-items:center;gap:12px}
-    .counter{font-size:10px;color:#8194b3;font-weight:400}
+    .counter{font-size:10px;color:#475569;font-weight:500}
     .actions{display:flex;align-items:center;justify-content:space-between;gap:15px;margin-top:19px}
     .actions .cancel{order:-1}
-    .cancel{color:#627a9d;text-decoration:none;font-size:12px;background:none;border:0;padding:0;cursor:pointer;font-family:inherit}
+    .cancel{color:#334155;text-decoration:none;font-size:12px;font-weight:600;background:none;border:0;padding:0;cursor:pointer;font-family:inherit}
     .continue{display:flex;align-items:center;justify-content:center;gap:12px;border:0;border-radius:10px;background:var(--orange);color:#fff;padding:0 23px;height:43px;font-size:12px;font-weight:600;box-shadow:0 5px 12px rgba(255,77,28,.14);transition:transform .15s,opacity .15s;text-decoration:none}
     .continue:hover{transform:translateY(-1px)}
     .continue:disabled{opacity:.45;cursor:not-allowed;transform:none}
@@ -302,41 +431,41 @@ $step = $success ? 'done' : $step;
     .bank-card{border:1px solid var(--border);border-radius:12px;padding:13px;background:#fff;min-width:0}
     .bank-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
     .bank-icon{width:27px;height:27px;display:grid;place-items:center;border-radius:8px;background:#fff0eb;color:var(--orange);font-size:15px}
-    .account-type{font-size:8px;color:#8da0bc;letter-spacing:.5px;text-transform:uppercase}
-    .bank-name{font-size:12px;font-weight:600;line-height:1.45;margin:0 0 3px}
-    .bank-owner{font-size:9px;line-height:1.4;color:#8194b3;margin:0 0 9px;min-height:13px}
+    .account-type{font-size:9px;color:#475569;letter-spacing:.5px;text-transform:uppercase;font-weight:700}
+    .bank-name{font-size:12px;font-weight:700;line-height:1.45;margin:0 0 3px;color:#142747}
+    .bank-owner{font-size:10px;line-height:1.4;color:#334155;margin:0 0 9px;min-height:13px;font-weight:500}
     .account-box{display:flex;align-items:center;justify-content:space-between;gap:5px;background:#f4f6f9;border:1px solid #e8edf3;border-radius:8px;padding:6px 7px}
     .account-number{font-size:10px;font-weight:600;letter-spacing:.5px;color:#203452;overflow-wrap:anywhere}
     .copy-btn{width:24px;height:24px;flex-shrink:0;border:0;border-radius:6px;background:var(--orange);color:#fff;font-size:12px;display:grid;place-items:center;}
-    .safety-note{font-size:9px;line-height:1.6;color:#8496b2;margin:8px 0 0}
+    .safety-note{font-size:10px;line-height:1.6;color:#475569;margin:8px 0 0;font-weight:500}
     .upload-card{padding:17px}
     .upload-title{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;margin:0 0 12px}
-    .dropzone{border:1.5px dashed #d7e0ed;border-radius:10px;min-height:160px;padding:20px 12px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;transition:background .15s,border-color .15s;cursor:pointer}
+    .dropzone{border:1.5px dashed #cbd5e1;border-radius:10px;min-height:160px;padding:20px 12px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;transition:background .15s,border-color .15s;cursor:pointer}
     .dropzone.dragover{background:#f0f3ff;border-color:var(--blue)}
-    .upload-icon{width:38px;height:38px;border-radius:11px;background:#e9eef5;color:#8296b5;display:grid;place-items:center;font-size:20px;margin-bottom:10px}
-    .upload-main{font-size:11px;font-weight:600;margin:0 0 4px}
-    .browse{color:var(--orange);cursor:pointer;font-size:10px}
-    .file-rules{font-size:8px;color:#91a1b9;background:#f3f5f8;border:1px solid #e6ebf2;border-radius:20px;padding:4px 9px;margin-top:10px}
+    .upload-icon{width:38px;height:38px;border-radius:11px;background:#e9eef5;color:#475569;display:grid;place-items:center;font-size:20px;margin-bottom:10px}
+    .upload-main{font-size:11px;font-weight:600;margin:0 0 4px;color:#142747}
+    .browse{color:var(--orange);cursor:pointer;font-size:10px;font-weight:700}
+    .file-rules{font-size:9px;color:#334155;background:#f3f5f8;border:1px solid #e2e8f0;border-radius:20px;padding:4px 9px;margin-top:10px;font-weight:500}
     .drop-preview{display:none;align-items:center;gap:10px;width:100%;max-width:320px;text-align:left;padding:10px;background:#fff;border:1px solid var(--border);border-radius:9px;margin-top:12px}
     .drop-preview.show{display:flex}
     .file-type{width:32px;height:36px;display:grid;place-items:center;background:#fff0eb;color:var(--orange);border-radius:7px;font-size:10px;font-weight:700}
     .file-details{min-width:0;flex:1}.file-name{font-size:10px;font-weight:600;overflow-wrap:anywhere;margin:0 0 3px}.file-size{font-size:9px;color:var(--muted);margin:0}
     .remove-file{border:0;background:transparent;color:#e24a2b;font-size:17px}
-    .schedule-label{font-size:9px;color:#8a9bb5;text-transform:uppercase;letter-spacing:.5px;margin:0 0 7px}
+    .schedule-label{font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin:0 0 7px;font-weight:700}
     .schedule-box{background:#f5f7fa;border:1px solid #e6ebf2;border-radius:8px;padding:10px;margin-bottom:13px}
-    .schedule-name{font-size:10px;font-weight:600;margin:0 0 3px}
-    .schedule-time{font-size:9px;color:#7d91b0;margin:0}
-    .summary-due{border-top:1px solid #e8edf3;padding-top:13px;display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:10px;color:#8194b3}
+    .schedule-name{font-size:11px;font-weight:700;margin:0 0 3px;color:#142747}
+    .schedule-time{font-size:10px;color:#334155;margin:0}
+    .summary-due{border-top:1px solid #e8edf3;padding-top:13px;display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:11px;color:#334155;font-weight:600}
     .summary-due strong{font-size:14px;color:var(--orange);white-space:nowrap}
-    .back-link{color:#617a9c;font-size:11px;text-decoration:none;background:none;border:none;cursor:pointer}
+    .back-link{color:#334155;font-size:11px;text-decoration:none;background:none;border:none;cursor:pointer;font-weight:600}
     .submit-btn{height:42px;padding:0 18px;display:flex;align-items:center;justify-content:center;gap:9px;border:0;border-radius:9px;background:var(--orange);color:#fff;font-size:11px;font-weight:600;box-shadow:0 4px 12px #ff4d1c20;transition:transform .15s,opacity .15s}
     .submit-btn:hover:not(:disabled){transform:translateY(-1px)}
     .submit-btn:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
     .message{display:none;margin-top:12px;padding:10px 12px;border-radius:8px;font-size:10px;line-height:1.6}
     .message.error{display:block;background:#fff0eb;color:#b93c1d}
     .message.success{display:block;background:#eaf8ef;color:#267446}
-    .store-pickup-details p{margin:0 0 2px;font-size:11px;color:#7185a5;line-height:1.6}
-    .store-pickup-details p:first-child{font-weight:600;color:#172b4b}
+    .store-pickup-details p{margin:0 0 2px;font-size:11px;color:#334155;line-height:1.6}
+    .store-pickup-details p:first-child{font-weight:700;color:#172b4b}
     @media(max-width:760px){
       main.checkout-main{margin-top:24px}.checkout-grid{grid-template-columns:1fr;gap:17px}.summary-card{grid-row:1}
       .summary-card .summary-content{display:grid;grid-template-columns:1fr 1fr;gap:0 18px}
@@ -359,30 +488,57 @@ $step = $success ? 'done' : $step;
 <main class="checkout-main">
 
 <?php if ($success): ?>
+<?php $smode = $success['mode'] ?? 'online'; ?>
     <div class="page-title-row">
         <a class="back-btn" href="/playerdashboard" aria-label="Dashboard">‹</a>
-        <h1>Payment Submitted!</h1>
+        <h1><?php echo $smode === 'counter' ? 'Order Placed!' : ($smode === 'mixed' ? 'Order &amp; Payment Submitted' : 'Payment Submitted!'); ?></h1>
     </div>
     <div class="card card-pad" style="text-align:center;">
         <div style="width:80px;height:80px;margin:0 auto 24px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:16px;display:grid;place-items:center;">
-            <span class="material-symbols-outlined" style="color:#059669;font-size:40px;">verified</span>
+            <span class="material-symbols-outlined" style="color:#059669;font-size:40px;"><?php echo $smode === 'counter' ? 'storefront' : 'verified'; ?></span>
         </div>
-        <h2 style="font-size:24px;font-weight:700;margin:0 0 8px;">Payment Submitted!</h2>
-        <p style="color:#7c90b0;font-size:12px;margin:0 0 24px;max-width:420px;margin-left:auto;margin-right:auto;">Your bank transfer has been recorded and is awaiting verification by our team. We'll confirm your <?php echo $has_bookings ? 'court schedule' : 'order'; ?> once the transfer is verified.</p>
+        <h2 style="font-size:24px;font-weight:700;margin:0 0 8px;"><?php echo $smode === 'counter' ? 'Order Placed!' : ($smode === 'mixed' ? 'Order &amp; Payment Submitted' : 'Payment Submitted!'); ?></h2>
+        <p style="color:#475569;font-size:12px;margin:0 0 24px;max-width:420px;margin-left:auto;margin-right:auto;line-height:1.6;">
+        <?php if ($smode === 'counter'): ?>
+            Your shop order has been placed. Please pay the exact amount at the Hi-Power BC counter when you pick up your items. Your order is marked <strong>Pending</strong> until pickup.
+        <?php elseif ($smode === 'mixed'): ?>
+            Your court booking payment is awaiting verification by our team. Your shop items have also been placed as a separate order &mdash; please pay the shop total at the counter on pickup.
+        <?php else: ?>
+            Your GCash/Maya payment has been recorded and is awaiting verification by our team. We'll confirm your court schedule once the payment is verified.
+        <?php endif; ?>
+        </p>
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;max-width:520px;margin:0 auto 24px;">
             <div style="background:#f5f7fa;padding:12px;border-radius:10px;border:1px solid var(--border);">
-                <p style="font-size:9px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.7px;margin:0 0 4px;">Reference No.</p>
+                <p style="font-size:9px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.7px;margin:0 0 4px;"><?php echo $smode === 'counter' ? 'Order Ref.' : 'Reference No.'; ?></p>
                 <p style="font-weight:700;font-size:12px;word-break:break-all;margin:0;"><?php echo htmlspecialchars($success['ref']); ?></p>
             </div>
             <div style="background:#f5f7fa;padding:12px;border-radius:10px;border:1px solid var(--border);">
-                <p style="font-size:9px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.7px;margin:0 0 4px;">Amount Transferred</p>
+                <p style="font-size:9px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.7px;margin:0 0 4px;"><?php echo $smode === 'counter' ? 'Amount to Pay' : 'Amount Sent'; ?></p>
                 <p style="font-weight:700;font-size:12px;color:var(--orange);margin:0;"><?php echo fmt_php($success['amount']); ?></p>
             </div>
             <div style="background:#f5f7fa;padding:12px;border-radius:10px;border:1px solid var(--border);">
-                <p style="font-size:9px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.7px;margin:0 0 4px;">Status</p>
-                <p style="font-weight:700;font-size:12px;color:#d97706;margin:0;">Pending Verification</p>
+                <p style="font-size:9px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.7px;margin:0 0 4px;">Status</p>
+                <p style="font-weight:700;font-size:12px;color:#d97706;margin:0;"><?php echo $smode === 'counter' ? 'Pending — Pay at Counter' : 'Pending Verification'; ?></p>
             </div>
         </div>
+        <?php if ($smode === 'mixed' && !empty($success['shop_ref'])): ?>
+        <div style="max-width:520px;margin:0 auto 24px;background:#fff7ed;border:1px solid #fed7aa;border-radius:12px;padding:14px 16px;text-align:left;">
+            <p style="font-size:9px;font-weight:700;color:#9a3412;text-transform:uppercase;letter-spacing:.7px;margin:0 0 6px;">Shop order &mdash; pay at the counter</p>
+            <p style="font-size:12px;margin:0;color:#7c2d12;"><strong><?php echo htmlspecialchars($success['shop_ref']); ?></strong> &middot; <?php echo fmt_php($success['shop_amount']); ?> due at pickup. Status: Pending.</p>
+        </div>
+        <?php endif; ?>
+        <?php if (!empty($success['order_id'])): ?>
+        <div style="max-width:520px;margin:0 auto 24px;background:#f8fafc;border:1px solid var(--border);border-radius:12px;padding:14px;display:flex;gap:16px;align-items:center;text-align:left;">
+            <img src="/receipt.php?order_id=<?php echo (int)$success['order_id']; ?>" alt="Receipt preview" style="width:104px;height:auto;border:1px solid #e2e8f0;border-radius:6px;background:#fff;flex-shrink:0;">
+            <div style="min-width:0;">
+                <p style="font-size:9px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.7px;margin:0 0 4px;">Your receipt is ready</p>
+                <p style="font-size:11px;color:#334155;margin:0 0 10px;line-height:1.6;">Save it and present it at the counter when you pick up your order.</p>
+                <a href="/receipt.php?order_id=<?php echo (int)$success['order_id']; ?>&amp;download=1" style="display:inline-flex;align-items:center;gap:6px;background:#08111d;color:#fff;text-decoration:none;border-radius:8px;padding:9px 14px;font-size:11px;font-weight:700;">
+                    <span class="material-symbols-outlined" style="font-size:15px;">download</span> Download Receipt
+                </a>
+            </div>
+        </div>
+        <?php endif; ?>
         <a href="/playerdashboard" class="continue" style="display:inline-flex;text-decoration:none;">Go to Dashboard</a>
     </div>
 
@@ -390,13 +546,13 @@ $step = $success ? 'done' : $step;
 
     <div class="page-title-row">
         <a href="/cart" class="back-btn" aria-label="Back to cart" onclick="return confirm('Leave checkout? Your selection will be kept in the cart.')">‹</a>
-        <h1>Bank Transfer Checkout</h1>
+        <h1><?php echo $has_bookings ? 'GCash &amp; Maya Checkout' : 'Pay at Counter Checkout'; ?></h1>
     </div>
 
     <div class="steps" aria-label="Checkout progress">
         <div class="step <?php echo $step === 'step1' ? 'active' : 'done'; ?>"><span class="step-number">1</span><span>Fulfillment &amp; Verification</span></div>
         <span class="step-line"></span>
-        <div class="step <?php echo $step === 'step2' ? 'active' : ''; ?>"><span class="step-number">2</span><span>Bank Transfer &amp; Upload</span></div>
+        <div class="step <?php echo $step === 'step2' ? 'active' : ''; ?>"><span class="step-number">2</span><span><?php echo $has_bookings ? 'GCash/Maya &amp; Upload' : 'Pay at the Counter'; ?></span></div>
     </div>
 
     <?php if (!empty($errors)): ?>
@@ -439,7 +595,7 @@ $step = $success ? 'done' : $step;
                         <?php endforeach; ?>
                         <label class="confirmation">
                             <input type="checkbox" name="confirm_schedule" value="1" id="confirmDetails" required>
-                            <span>I confirm that all dates and time slots above are correct. No-shows or reschedules may be subject to fees.</span>
+                            <span>I confirm that all dates and time slots above are correct. <strong>Refund policy:</strong> court bookings may be cancelled only at least 24 hours before the scheduled start, and refunds must be requested within 24 hours of cancelling. Approved and verified requests receive a 100% full refund, subject to admin review and payment verification. No-shows may be charged in full.</span>
                         </label>
                     </section>
                     <?php endif; ?>
@@ -466,7 +622,6 @@ $step = $success ? 'done' : $step;
                         <?php endif; ?>
                         <hr class="summary-divider">
                         <div class="summary-line"><span>Subtotal</span><strong><?php echo fmt_php($subtotal); ?></strong></div>
-                        <div class="summary-line"><span>Tax (8%)</span><strong><?php echo fmt_php($tax); ?></strong></div>
                         <hr class="summary-divider">
                         <div class="amount-due"><span>Amount Due</span><strong><?php echo fmt_php($grand_total); ?></strong></div>
                     </div>
@@ -474,7 +629,7 @@ $step = $success ? 'done' : $step;
             </div>
 
             <div class="actions">
-                <button type="submit" name="action" value="step1" class="continue" id="continueBtn">Continue to Bank Transfer <span class="material-symbols-outlined text-[16px]">arrow_forward</span></button>
+                <button type="submit" name="action" value="step1" class="continue" id="continueBtn"><?php echo $has_bookings ? 'Continue to GCash/Maya' : 'Continue to Pay at Counter'; ?> <span class="material-symbols-outlined text-[16px]">arrow_forward</span></button>
                 <button type="submit" name="action" value="cancel" class="cancel">Cancel</button>
             </div>
             <div class="notice" id="notice" role="status"></div>
@@ -487,13 +642,20 @@ $step = $success ? 'done' : $step;
             <div class="checkout-grid">
                 <div class="left-column">
                     <section class="amount-card">
-                        <p class="eyebrow">Exact amount to transfer</p>
+                        <?php if ($has_bookings): ?>
+                        <p class="eyebrow">Exact amount to send online</p>
+                        <p class="amount"><?php echo fmt_php($subtotal_booking); ?></p>
+                        <p class="amount-help">Send this exact amount via GCash or Maya for your court booking, then upload your receipt/screenshot.<?php if ($has_shop): ?> Shop items (<?php echo fmt_php($subtotal_shop); ?>) are paid at the counter on pickup.<?php endif; ?></p>
+                        <?php else: ?>
+                        <p class="eyebrow">Amount to pay at the counter</p>
                         <p class="amount"><?php echo fmt_php($grand_total); ?></p>
-                        <p class="amount-help">Transfer this exact amount to either bank account below, then upload your receipt.</p>
+                        <p class="amount-help">No online payment is needed for shop orders. Please pay this exact amount at the Hi-Power BC counter when you pick up your items.</p>
+                        <?php endif; ?>
                     </section>
 
+                    <?php if ($has_bookings): ?>
                     <section>
-                        <h2 class="section-title"><span class="section-icon material-symbols-outlined text-[18px]">account_balance</span> Where to Transfer</h2>
+                        <h2 class="section-title"><span class="section-icon material-symbols-outlined text-[18px]">qr_code_2</span> Pay via GCash or Maya</h2>
                         <div class="bank-grid">
                             <?php foreach ($banks as $i => $bank): ?>
                             <?php $btn_id = 'copyBtn' . $i; ?>
@@ -506,16 +668,23 @@ $step = $success ? 'done' : $step;
                                 <p class="bank-owner"><?php echo htmlspecialchars($bank['account_name']); ?></p>
                                 <div class="account-box">
                                     <span class="account-number"><?php echo htmlspecialchars($bank['account_number']); ?></span>
-                                    <button type="button" data-account="<?php echo htmlspecialchars($bank['account_number']); ?>" class="copy-btn <?php echo $btn_id; ?>" title="Copy account number"><span class="material-symbols-outlined text-[14px]">content_copy</span></button>
+                                    <button type="button" data-account="<?php echo htmlspecialchars($bank['account_number']); ?>" class="copy-btn <?php echo $btn_id; ?>" title="Copy number"><span class="material-symbols-outlined text-[14px]">content_copy</span></button>
                                 </div>
+                                <?php if (!empty($bank['qr'])): ?>
+                                <div class="bank-qr" style="margin-top:10px;text-align:center;">
+                                    <img src="<?php echo htmlspecialchars($bank['qr']); ?>" alt="<?php echo htmlspecialchars($bank['bank']); ?> QR code" style="width:100%;max-width:180px;height:auto;border-radius:10px;border:1px solid #e8edf3;background:#fff;display:inline-block;" loading="lazy" onerror="this.style.display='none';var m=this.nextElementSibling;if(m)m.style.display='block';">
+                                    <p style="font-size:9px;color:#475569;margin:6px 0 0;font-weight:600;">Scan to pay via <?php echo htmlspecialchars($bank['bank']); ?></p>
+                                    <p style="display:none;font-size:10px;color:#b91c1c;margin:6px 0 0;">QR image not found (<?php echo htmlspecialchars($bank['qr']); ?>). Please send to <?php echo htmlspecialchars($bank['account_number']); ?>.</p>
+                                </div>
+                                <?php endif; ?>
                             </article>
                             <?php endforeach; ?>
                         </div>
-                        <p class="safety-note">ⓘ &nbsp; Double-check the account name before transferring. We will verify every payment manually.</p>
+                        <p class="safety-note">ⓘ &nbsp; Double-check the account name and number before sending. We will verify every payment manually.</p>
                     </section>
 
                     <section class="card upload-card">
-                        <h2 class="upload-title"><span class="section-icon material-symbols-outlined text-[18px]">upload_file</span> Upload Proof of Transfer</h2>
+                        <h2 class="upload-title"><span class="section-icon material-symbols-outlined text-[18px]">upload_file</span> Upload Proof of Payment</h2>
                         <div id="dropzone" class="dropzone">
                             <input type="file" name="receipt" id="receiptInput" accept="image/png,image/jpeg" class="hidden">
                             <div id="dropEmpty">
@@ -534,6 +703,20 @@ $step = $success ? 'done' : $step;
                             </div>
                         </div>
                     </section>
+                    <?php endif; ?>
+
+                    <?php if ($has_shop && !$has_bookings): ?>
+                    <section class="card card-pad">
+                        <h2 class="card-heading"><span class="heading-symbol material-symbols-outlined text-[18px]">storefront</span> Pay at the Counter</h2>
+                        <p style="font-size:11px;color:#334155;line-height:1.7;margin:0 0 10px;">Shop orders are paid in person. Bring your order reference and pay the exact amount at the Hi-Power BC counter when you pick up your items.</p>
+                        <div class="store-pickup-details">
+                            <p><?php echo htmlspecialchars($pickup['name']); ?></p>
+                            <p><?php echo htmlspecialchars($pickup['address']); ?></p>
+                            <p><?php echo htmlspecialchars($pickup['hours']); ?></p>
+                        </div>
+                        <p class="safety-note">ⓘ &nbsp; Your order will be marked <strong>Pending</strong> and prepared for pickup. No online payment or receipt is required for shop items.</p>
+                    </section>
+                    <?php endif; ?>
                 </div>
 
                 <aside class="card card-pad summary-card">
@@ -573,7 +756,14 @@ $step = $success ? 'done' : $step;
                         </div>
                         <?php endif; ?>
 
-                        <div class="summary-due"><span>Amount Due</span><strong><?php echo fmt_php($grand_total); ?></strong></div>
+                        <?php if ($has_shop && $has_bookings): ?>
+                        <div class="summary-due"><span>Pay online now</span><strong><?php echo fmt_php($subtotal_booking); ?></strong></div>
+                        <div class="summary-line" style="margin-top:8px;"><span>Pay at counter (shop)</span><strong><?php echo fmt_php($subtotal_shop); ?></strong></div>
+                        <?php elseif ($has_shop): ?>
+                        <div class="summary-due"><span>Pay at counter</span><strong><?php echo fmt_php($grand_total); ?></strong></div>
+                        <?php else: ?>
+                        <div class="summary-due"><span>Pay online now</span><strong><?php echo fmt_php($subtotal_booking); ?></strong></div>
+                        <?php endif; ?>
                     </div>
                 </aside>
             </div>
@@ -581,7 +771,11 @@ $step = $success ? 'done' : $step;
             <div class="actions">
                 <div style="display:flex;align-items:center;gap:15px;flex:1;justify-content:flex-end">
                     <button type="button" class="back-link" onclick="goBackToStep1()"><span class="material-symbols-outlined text-[16px]">arrow_back</span> Back</button>
-                    <button type="submit" name="action" value="submit_payment" class="submit-btn" id="submitBtn" disabled><span class="material-symbols-outlined text-[16px]">send</span> &nbsp; I've Sent the Transfer <span class="material-symbols-outlined text-[16px]">arrow_forward</span></button>
+                    <?php if ($has_bookings): ?>
+                    <button type="submit" name="action" value="submit_payment" class="submit-btn" id="submitBtn" disabled><span class="material-symbols-outlined text-[16px]">send</span> &nbsp; <?php echo $has_shop ? "I've Sent the Payment &amp; Place Shop Order" : "I've Sent the Payment"; ?> <span class="material-symbols-outlined text-[16px]">arrow_forward</span></button>
+                    <?php else: ?>
+                    <button type="submit" name="action" value="submit_counter" class="submit-btn" id="submitBtn"><span class="material-symbols-outlined text-[16px]">storefront</span> &nbsp; Place Order &mdash; Pay at Counter <span class="material-symbols-outlined text-[16px]">arrow_forward</span></button>
+                    <?php endif; ?>
                 </div>
                 <button type="submit" name="action" value="cancel" class="cancel">Cancel</button>
             </div>

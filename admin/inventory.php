@@ -14,6 +14,7 @@ if ($_SESSION['role'] !== 'Admin' && $_SESSION['role'] !== 'Head Manager') {
 
 require_once __DIR__ . '/../includes/database_connect.php';
 require_once __DIR__ . '/../includes/csrf_helper.php';
+require_once __DIR__ . '/../includes/inventory_helper.php';
 
 $admin_name = $_SESSION['full_name'];
 $admin_role = $_SESSION['role'];
@@ -151,7 +152,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
 // FETCH INVENTORY DATA & STATS
 // ==========================================
 $total_items = $pdo->query("SELECT COUNT(*) FROM Products")->fetchColumn() ?? 0;
-$low_stock_alerts = $pdo->query("SELECT COUNT(*) FROM Products WHERE stock_quantity <= 5 AND stock_quantity > 0")->fetchColumn() ?? 0;
+$low_stock_alerts = low_stock_count($pdo);
 
 $cat_stmt = $pdo->query("SELECT category, COUNT(*) as count FROM Products GROUP BY category ORDER BY count DESC");
 $all_categories = $cat_stmt->fetchAll(PDO::FETCH_ASSOC);

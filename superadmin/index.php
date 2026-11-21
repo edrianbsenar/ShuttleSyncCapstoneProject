@@ -1,5 +1,4 @@
 <?php
-
 require_once __DIR__ . '/guard.php';
 require_once __DIR__ . '/../includes/database_connect.php';
 require_once __DIR__ . '/../includes/csrf_helper.php';
@@ -12,11 +11,13 @@ $self_id = (int)$_SESSION['sa_user_id'];
 $success_message = '';
 $error_message = '';
 
-// ---- Handle Form Submissions (Create Admin or Bulk Update) ----
+// ==========================================
+// 1. HANDLE FORM SUBMISSIONS (Create Admin or Bulk Update)
+// ==========================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     verify_csrf_token();
 
-    // 1. Handle Create Admin
+    // Handle Create Admin account action
     if (isset($_POST['action']) && $_POST['action'] === 'create_admin') {
         try {
             $full_name = trim($_POST['full_name'] ?? '');
@@ -36,8 +37,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $hashed_password = password_hash($password, PASSWORD_DEFAULT);
 
-            $stmt = $pdo->prepare("INSERT INTO Users (full_name, email, password, password_hash, role, account_status, created_at) VALUES (?, ?, ?, ?, 'Active', NOW())");
-            $stmt->execute([$full_name, $email, $hashed_password, $hashed_password, $role]);
+            $stmt = $pdo->prepare("INSERT INTO Users (full_name, email, password, password_hash, role, account_status, created_at) VALUES (?, ?, ?, ?, 'Admin', 'Active', NOW())");
+            $stmt->execute([$full_name, $email, $hashed_password, $hashed_password]);
 
             $success_message = "New admin account successfully created for " . htmlspecialchars($full_name) . "!";
         } catch (Exception $e) {
@@ -45,7 +46,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    // 2. Handle Bulk Update Users (Role and Status only; skill level is read-only for SuperAdmin)
+    // Handle Bulk Update Users (Role and Status configuration)
     if (isset($_POST['action']) && $_POST['action'] === 'update_all_users') {
         $users_data = $_POST['users'] ?? [];
         $updated_count = 0;
@@ -85,20 +86,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// ---- Fetch users with created_at and last_login ----
+// ==========================================
+// 2. FETCH USERS DATA (Search, Sort, & Directory Listing)
+// ==========================================
 $search = trim($_GET['q'] ?? '');
+$sort   = trim($_GET['sort'] ?? 'newest'); // Default sorting parameter
+
+// Determine ORDER BY clause based on sort selection
+$order_sql = "ORDER BY user_id DESC"; // Default fallback
+if ($sort === 'alphabetical') {
+    $order_sql = "ORDER BY full_name ASC";
+} elseif ($sort === 'last_login') {
+    // Most recent login date comes first; NULL or never logged-in accounts are pushed to the end
+    $order_sql = "ORDER BY last_login IS NULL ASC, last_login DESC";
+}
+
 if ($search !== '') {
     $stmt = $pdo->prepare(
         "SELECT user_id, full_name, email, role, account_status, skill_level, created_at, last_login
          FROM Users
          WHERE (full_name LIKE :q1 OR email LIKE :q2) AND user_id != :self_id
-         ORDER BY user_id DESC"
+         {$order_sql}"
     );
     $stmt->execute(['q1' => "%{$search}%", 'q2' => "%{$search}%", 'self_id' => $self_id]);
 } else {
     $stmt = $pdo->prepare(
         "SELECT user_id, full_name, email, role, account_status, skill_level, created_at, last_login
-         FROM Users WHERE user_id != :self_id ORDER BY user_id DESC"
+         FROM Users WHERE user_id != :self_id {$order_sql}"
     );
     $stmt->execute(['self_id' => $self_id]);
 }
@@ -151,28 +165,50 @@ $role_badge = [
             </div>
         <?php endif; ?>
 
-        <!-- Search Bar and Role Filters -->
-        <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-            <form method="GET" class="flex gap-2 w-full md:w-auto">
-                <div class="relative w-full max-w-sm">
+        <!-- Search Bar, Sort Options, and Role Filters -->
+        <div class="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
+            <form method="GET" class="flex flex-wrap gap-2 w-full lg:w-auto">
+                <div class="relative w-full sm:max-w-xs">
                     <span class="material-symbols-outlined absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 text-[20px]">search</span>
                     <input type="text" name="q" value="<?php echo htmlspecialchars($search); ?>"
                            placeholder="Search by name or email…"
                            class="w-full rounded-2xl border border-slate-200 bg-white pl-10 pr-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#FF5722]/20 focus:border-[#FF5722] transition-all">
                 </div>
+                
+                <!-- Hidden input to preserve sort selection during searches -->
+                <?php if ($sort !== 'newest'): ?>
+                    <input type="hidden" name="sort" value="<?php echo htmlspecialchars($sort); ?>">
+                <?php endif; ?>
+
                 <button type="submit" class="bg-[#080F17] text-white text-sm font-bold rounded-2xl px-6 py-3 hover:bg-slate-800 transition-colors shrink-0 shadow-sm">
                     Search
                 </button>
-                <?php if ($search !== ''): ?>
-                <a href="index.php" class="text-sm text-slate-500 self-center hover:underline font-semibold shrink-0 ml-2">Clear</a>
+                <?php if ($search !== '' || $sort !== 'newest'): ?>
+                <a href="index.php" class="text-sm text-slate-500 self-center hover:underline font-semibold shrink-0 ml-2">Reset</a>
                 <?php endif; ?>
             </form>
 
-            <!-- Filter Buttons: All, Admin, Players -->
-            <div class="flex items-center gap-1.5 bg-white p-1.5 rounded-2xl border border-slate-200/80 shadow-sm">
-                <button type="button" class="filter-btn active px-4 py-2 text-xs font-bold bg-[#FF5722] text-white rounded-xl shadow-sm transition-all" data-filter="all">All</button>
-                <button type="button" class="filter-btn px-4 py-2 text-xs font-bold text-slate-600 hover:text-slate-900 rounded-xl transition-all" data-filter="Admin">Admin</button>
-                <button type="button" class="filter-btn px-4 py-2 text-xs font-bold text-slate-600 hover:text-slate-900 rounded-xl transition-all" data-filter="Player">Players</button>
+            <div class="flex flex-wrap items-center gap-3 w-full lg:w-auto justify-between lg:justify-end">
+                <!-- Sort Dropdown Selector -->
+<div class="relative inline-block">
+    <form method="GET" id="sort-form">
+        <?php if ($search !== ''): ?>
+            <input type="hidden" name="q" value="<?php echo htmlspecialchars($search); ?>">
+        <?php endif; ?>
+        <select name="sort" onchange="this.form.submit()"
+                class="appearance-none bg-white border border-slate-200 text-slate-700 text-xs font-bold rounded-2xl px-4 py-3 pr-4 shadow-sm focus:outline-none focus:ring-2 focus:ring-[#FF5722]/20 focus:border-[#FF5722] cursor-pointer transition-all">
+            <option value="newest" <?php echo $sort === 'newest' ? 'selected' : ''; ?>>Sort by: Newest</option>
+            <option value="alphabetical" <?php echo $sort === 'alphabetical' ? 'selected' : ''; ?>>Sort by: Alphabetical (A-Z)</option>
+            <option value="last_login" <?php echo $sort === 'last_login' ? 'selected' : ''; ?>>Sort by: Last Logged In (Recent)</option>
+        </select>
+    </form>
+</div>
+                <!-- Filter Buttons: All, Admin, Players -->
+                <div class="flex items-center gap-1.5 bg-white p-1.5 rounded-2xl border border-slate-200/80 shadow-sm">
+                    <button type="button" class="filter-btn active px-4 py-2 text-xs font-bold bg-[#FF5722] text-white rounded-xl shadow-sm transition-all" data-filter="all">All</button>
+                    <button type="button" class="filter-btn px-4 py-2 text-xs font-bold text-slate-600 hover:text-slate-900 rounded-xl transition-all" data-filter="Admin">Admin</button>
+                    <button type="button" class="filter-btn px-4 py-2 text-xs font-bold text-slate-600 hover:text-slate-900 rounded-xl transition-all" data-filter="Player">Players</button>
+                </div>
             </div>
         </div>
 
@@ -328,7 +364,7 @@ $role_badge = [
     }
 
     document.addEventListener('DOMContentLoaded', function() {
-        // Filter logic
+        // Filter logic (All, Admin, Players)
         const filterBtns = document.querySelectorAll('.filter-btn');
         filterBtns.forEach(btn => {
             btn.addEventListener('click', () => {

@@ -1,5 +1,7 @@
 <?php
 // admin/includes/admin_header.php — HI-POWER admin chrome.
+require_once __DIR__ . '/../../includes/inventory_helper.php';
+
 $current_page = basename($_SERVER['PHP_SELF']);
 $admin_name_nav = $_SESSION['full_name'] ?? 'Admin';
 $admin_role_nav = $_SESSION['role'] ?? 'Manager';
@@ -13,7 +15,7 @@ $nav_items = [
     'announcements.php' => ['icon' => 'campaign', 'label' => 'Announcements'],
     'user_orders.php' => ['icon' => 'receipt_long', 'label' => 'Orders'],
     'user_bookings.php' => ['icon' => 'calendar_month', 'label' => 'Bookings'],
-    'payments.php' => ['icon' => 'account_balance', 'label' => 'Bank Payments'],
+    'payments.php' => ['icon' => 'qr_code_2', 'label' => 'Payments'],
     'refunds.php' => ['icon' => 'currency_exchange', 'label' => 'Refunds'],
     'support.php' => ['icon' => 'headset', 'label' => 'Support']
 ];
@@ -21,9 +23,28 @@ $nav_items = [
 $admin_notifications = [];
 if (isset($pdo)) {
     try {
-        $stock_stmt = $pdo->query("SELECT product_id, name, stock_quantity FROM Products WHERE stock_quantity <= 5 AND is_active = 1 LIMIT 5");
-        while ($row = $stock_stmt->fetch()) {
-            $admin_notifications[] = ['icon' => 'warning', 'color' => 'text-amber-600 bg-amber-50 border-amber-200', 'title' => 'Low Stock', 'desc' => htmlspecialchars($row['name']) . ' (' . $row['stock_quantity'] . ' left)', 'time' => 'Action Needed', 'url' => 'inventory.php'];
+        $low_stock_items = get_low_stock_products($pdo, HP_LOW_STOCK_THRESHOLD, 5);
+        $low_stock_total = low_stock_count($pdo, HP_LOW_STOCK_THRESHOLD);
+        if ($low_stock_total > 0) {
+            $admin_notifications[] = [
+                'icon'  => 'warning',
+                'color' => 'text-red-700 bg-red-50 border-red-200',
+                'title' => 'Low Stock Alert',
+                'desc'  => $low_stock_total . ' product' . ($low_stock_total === 1 ? '' : 's') . ' at or below ' . HP_LOW_STOCK_THRESHOLD . ' — restock now',
+                'time'  => 'Action Needed',
+                'url'   => 'inventory.php'
+            ];
+            foreach ($low_stock_items as $row) {
+                $out = ((int)$row['stock_quantity'] <= 0);
+                $admin_notifications[] = [
+                    'icon'  => $out ? 'error' : 'inventory_2',
+                    'color' => $out ? 'text-red-700 bg-red-50 border-red-200' : 'text-amber-700 bg-amber-50 border-amber-200',
+                    'title' => $out ? 'Out of Stock' : 'Low Stock',
+                    'desc'  => htmlspecialchars($row['name']) . ' (' . (int)$row['stock_quantity'] . ' left)',
+                    'time'  => 'Action Needed',
+                    'url'   => 'inventory.php'
+                ];
+            }
         }
         $order_stmt = $pdo->query("SELECT order_number, order_date FROM Orders WHERE status = 'Pending' ORDER BY order_id DESC LIMIT 4");
         while ($row = $order_stmt->fetch()) {
@@ -84,10 +105,6 @@ $admin_alert_count = count($admin_notifications);
     main input::placeholder, main textarea::placeholder { color:#94A3B8; opacity:1; }
     main table { width:100%; border-collapse:separate; border-spacing:0; }
     main .overflow-x-auto { max-width:100%; }
-    main > footer { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px 24px; width:100%; min-height:64px; padding:20px 0 28px; color:#64748B; line-height:1.5; }
-    main > footer p { margin:0; }
-    main > footer a { color:#475569; }
-    main > footer a:hover { color:#FF5722; }
     .hp-ai-recommendation { color:#FFFFFF !important; background:linear-gradient(120deg,#080F17 0%,#101C29 72%,#14264A 100%) !important; border:1px solid #26384A !important; }
     .hp-ai-recommendation h2, .hp-ai-recommendation h4 { color:#FFFFFF !important; }
     .hp-ai-recommendation .hp-ai-description { color:#D7E0EB !important; }
@@ -95,7 +112,6 @@ $admin_alert_count = count($admin_notifications);
     .hp-ai-recommendation .hp-ai-impact { background:rgba(255,255,255,.07) !important; border:1px solid rgba(255,255,255,.16) !important; }
     .hp-ai-recommendation .hp-ai-secondary { color:#FFFFFF !important; border-color:#718096 !important; background:rgba(255,255,255,.04) !important; }
     .hp-ai-recommendation .hp-ai-secondary:hover { background:rgba(255,255,255,.12) !important; }
-    @media (max-width: 640px) { main > footer { align-items:flex-start; flex-direction:column; } main > footer > div { flex-wrap:wrap; gap:12px; } }
     @media print { #admin-sidebar, #admin-mobile-overlay, .no-print, .hp-page-actions, button { display:none !important; } main { margin:0 !important; padding:0 !important; max-width:none !important; } body { background:#fff !important; } .hp-ai-recommendation { print-color-adjust:exact; -webkit-print-color-adjust:exact; } }
 
 </style>
@@ -108,8 +124,8 @@ $admin_alert_count = count($admin_notifications);
     <div class="px-5 pt-5 pb-4">
         <div class="flex items-center justify-between mb-5">
             <a href="/" class="flex items-center gap-2.5 group" aria-label="HI-POWER home">
-                <div class="w-9 h-9 rounded-xl bg-primary flex items-center justify-center shadow-md group-hover:scale-105 transition-transform">
-                    <i class="fa-solid fa-bolt text-white text-[19px]" style="transform:skew(-12deg);" aria-hidden="true"></i>
+                <div class="w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center shadow-md group-hover:scale-105 transition-transform overflow-hidden p-0.5">
+                    <img src="/img/logo.png" alt="HI-POWER logo" class="w-full h-full object-contain">
                 </div>
                 <div>
                     <span class="text-base font-extrabold tracking-tight text-white">HI-POWER</span>
@@ -177,8 +193,8 @@ $admin_alert_count = count($admin_notifications);
             <span class="material-symbols-outlined">menu</span>
         </button>
         <div class="flex items-center gap-2">
-            <div class="w-7 h-7 rounded-lg bg-primary flex items-center justify-center">
-                <i class="fa-solid fa-bolt text-white text-[14px]" style="transform:skew(-12deg);" aria-hidden="true"></i>
+            <div class="w-7 h-7 rounded-lg bg-white/10 flex items-center justify-center overflow-hidden p-0.5">
+                <img src="/img/logo.png" alt="HI-POWER logo" class="w-full h-full object-contain">
             </div>
             <span class="text-sm font-extrabold text-white">HI-POWER</span>
         </div>

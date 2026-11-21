@@ -37,9 +37,8 @@ if (!in_array($booking['status'], ['Pending Payment'])) {
     exit;
 }
 
-$tax_rate = (float)Config::get('PAYMENT_TAX_RATE', 0.08);
-$tax_amount = $booking['total_price'] * $tax_rate;
-$grand_total = $booking['total_price'] + $tax_amount;
+// Tax removed system-wide: no tax is added to bookings.
+$grand_total = $booking['total_price'];
 
 $success_message = '';
 $error_message = '';
@@ -65,6 +64,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 $error_message = "This time slot has been taken by another booking. Please choose a different slot.";
             } else {
                 $pdo->prepare("UPDATE Bookings SET status = 'Pending' WHERE booking_id = ? AND user_id = ?")->execute([$booking_id, $user_id]);
+                
+                // Notify player
+                try {
+                    require_once __DIR__ . '/includes/notification_helper.php';
+                    notify_booking_status_change($pdo, $booking_id, 'Pending Payment', 'Pending', 'Awaiting counter payment verification');
+                } catch (Exception $e) {
+                    error_log("Notification failed: " . $e->getMessage());
+                }
+                
                 if ($is_ajax) {
                     header('Content-Type: application/json');
                     echo json_encode(['success' => true]);
@@ -94,7 +102,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 <head>
     <meta charset="utf-8">
     <meta content="width=device-width, initial-scale=1.0" name="viewport">
-    <title>Complete Payment | ShuttleSync</title>
+    <title>Complete Payment | HI-POWER</title>
     <?php include __DIR__ . '/includes/tailwind_config.php'; ?>
     <style>
         @keyframes fadeUp { from { opacity:0; transform:translateY(20px); } to { opacity:1; transform:translateY(0); } }
@@ -217,10 +225,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                         <span class="text-sm text-on-surface-variant">Court Fee (<?php echo date('h:i A', strtotime($booking['start_time'])) . ' – ' . date('h:i A', strtotime($booking['end_time'])); ?>)</span>
                         <span class="text-sm font-bold">₱<?php echo number_format($booking['total_price'], 2); ?></span>
                     </div>
-                    <div class="flex justify-between items-center">
-                        <span class="text-sm text-on-surface-variant">Tax (<?php echo ($tax_rate * 100); ?>%)</span>
-                        <span class="text-sm font-bold">₱<?php echo number_format($tax_amount, 2); ?></span>
-                    </div>
                     <div class="flex justify-between items-center border-t border-outline-variant/30 pt-3">
                         <span class="text-base font-bold text-on-surface">Total Due</span>
                         <span class="text-3xl font-bold text-primary">₱<?php echo number_format($grand_total, 2); ?></span>
@@ -273,6 +277,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     </div>
 </main>
 
+<?php include __DIR__ . '/includes/footer.php'; ?>
+
 <!-- ==========================================
      CASH PAYMENT TERMS MODAL
 ========================================== -->
@@ -304,7 +310,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     </li>
                     <li class="flex items-start gap-2">
                         <span class="material-symbols-outlined text-[14px] mt-0.5 shrink-0">check_circle</span>
-                        Cash payment at the counter: <strong>₱<?php echo number_format($grand_total, 2); ?></strong> (incl. tax).
+                        Cash payment at the counter: <strong>₱<?php echo number_format($grand_total, 2); ?></strong>.
                     </li>
                 </ul>
             </div>
@@ -350,7 +356,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     <div class="absolute bottom-0 left-0 w-12 h-12 bg-white/10 rounded-full translate-y-1/2 -translate-x-1/2"></div>
                     <div class="relative z-10">
                         <img src="/img/logo.png" class="w-10 h-10 mx-auto mb-2" onerror="this.style.display='none'">
-                        <p class="text-lg font-bold">ShuttleSync</p>
+                        <p class="text-lg font-bold">HI-POWER</p>
                         <p class="text-[10px] text-white/60 uppercase tracking-[0.2em] mt-1">Pay at Counter Receipt</p>
                     </div>
                 </div>
@@ -399,10 +405,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                             <span class="text-on-surface-variant">Court Fee</span>
                             <span class="font-semibold">₱<?php echo number_format($booking['total_price'], 2); ?></span>
                         </div>
-                        <div class="flex justify-between text-sm">
-                            <span class="text-on-surface-variant">Tax (<?php echo ($tax_rate * 100); ?>%)</span>
-                            <span class="font-semibold">₱<?php echo number_format($tax_amount, 2); ?></span>
-                        </div>
                         <div class="flex justify-between text-sm border-t border-outline-variant/20 pt-2">
                             <span class="font-bold text-on-surface">Total Due</span>
                             <span class="font-bold text-primary text-lg">₱<?php echo number_format($grand_total, 2); ?></span>
@@ -423,7 +425,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     </div>
 
                     <p class="text-[9px] text-on-surface-variant/40 text-center">
-                        Generated: <?php echo date('M d, Y h:i A'); ?> &middot; ShuttleSync &copy; <?php echo date('Y'); ?>
+                        Generated: <?php echo date('M d, Y h:i A'); ?> &middot; HI-POWER &copy; <?php echo date('Y'); ?>
                     </p>
                 </div>
             </div>
@@ -620,7 +622,7 @@ function printReceipt() {
             body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #fff; }
             * { box-sizing: border-box; }
         </style>
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+        <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&display=swap" rel="stylesheet">
         </head><body></body></html>
     `);
     printWindow.document.close();
@@ -628,10 +630,10 @@ function printReceipt() {
     // Apply styles inline
     const style = printWindow.document.createElement('style');
     style.textContent = `
-        body { font-family: 'Inter', sans-serif; padding: 10px; }
-        .bg-gradient-to-r { background: linear-gradient(to right, #3145e6, #2535b8) !important; }
+        body { font-family: 'Manrope', sans-serif; padding: 10px; }
+        .bg-gradient-to-r { background: linear-gradient(to right, #ff5722, #2535b8) !important; }
         .text-white { color: #fff !important; }
-        .text-primary { color: #3145e6 !important; }
+        .text-primary { color: #ff5722 !important; }
         .text-on-surface { color: #1a1a2e !important; }
         .text-on-surface-variant { color: #6b7280 !important; }
         .text-amber-700 { color: #b45309 !important; }
@@ -746,7 +748,7 @@ async function downloadReceipt() {
         });
 
         const link = document.createElement('a');
-        link.download = 'ShuttleSync-Receipt-<?php echo htmlspecialchars($booking['booking_reference']); ?>.png';
+        link.download = 'HI-POWER-Receipt-<?php echo htmlspecialchars($booking['booking_reference']); ?>.png';
         link.href = canvas.toDataURL('image/png');
         link.click();
     } catch (err) {

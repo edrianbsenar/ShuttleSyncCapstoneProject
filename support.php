@@ -233,11 +233,11 @@ if ($support_error !== '') {
 
                 <details class="faq-item bg-surface-container-lowest rounded-xl border border-outline-variant/30 overflow-hidden">
                     <summary class="flex items-center justify-between px-5 py-4 cursor-pointer hover:bg-surface-variant/30 transition-colors">
-                        <span class="text-sm font-bold text-on-surface pr-4">Can I cancel or reschedule my booking?</span>
+                        <span class="text-sm font-bold text-on-surface pr-4">Can I cancel or request a refund for my booking?</span>
                         <span class="material-symbols-outlined text-outline text-[18px] faq-arrow shrink-0">expand_more</span>
                     </summary>
                     <div class="px-5 pb-4 text-sm text-on-surface-variant leading-relaxed">
-                        Yes. Go to your <a href="playerdashboard" class="text-primary font-semibold hover:underline">Dashboard</a> &rarr; My Bookings tab. You can cancel a confirmed booking up to 2 hours before the scheduled time. Pending Payment bookings can be cancelled anytime.
+                        Yes. Go to your <a href="playerdashboard" class="text-primary font-semibold hover:underline">Dashboard</a> &rarr; My Bookings tab. Court bookings may only be cancelled at least <strong>24 hours before</strong> the scheduled start time; the Cancel button is locked within 24 hours of the slot. After cancelling, you can request a refund from the same dashboard within <strong>24 hours</strong>. Approved and verified requests receive a <strong>100% full refund</strong> of the amount paid, subject to admin review and payment verification.
                     </div>
                 </details>
 
@@ -260,7 +260,7 @@ if ($support_error !== '') {
                         <span class="material-symbols-outlined text-outline text-[18px] faq-arrow shrink-0">expand_more</span>
                     </summary>
                     <div class="px-5 pb-4 text-sm text-on-surface-variant leading-relaxed">
-                        We accept <strong>GCash</strong> (via PayMongo), <strong>PayPal</strong>, and <strong>Pay at Counter</strong> (cash). For court bookings, GCash and PayPal are processed online. Pay at Counter is available for both bookings and shop purchases.
+                        We accept <strong>GCash</strong> (via PayMongo), <strong>PayPal</strong>, and <strong>Pay at Counter</strong> (cash). Court bookings can be paid online via GCash/PayPal or at the counter. <strong>Shop purchases are paid at the counter only</strong> (cash on pickup).
                     </div>
                 </details>
 
@@ -276,11 +276,11 @@ if ($support_error !== '') {
 
                 <details class="faq-item bg-surface-container-lowest rounded-xl border border-outline-variant/30 overflow-hidden">
                     <summary class="flex items-center justify-between px-5 py-4 cursor-pointer hover:bg-surface-variant/30 transition-colors">
-                        <span class="text-sm font-bold text-on-surface pr-4">Can I get a refund?</span>
+                        <span class="text-sm font-bold text-on-surface pr-4">Can I request a refund for my booking?</span>
                         <span class="material-symbols-outlined text-outline text-[18px] faq-arrow shrink-0">expand_more</span>
                     </summary>
                     <div class="px-5 pb-4 text-sm text-on-surface-variant leading-relaxed">
-                        Refunds are handled case-by-case. If you cancelled a booking before the 2-hour window, the pending payment is simply released. For completed payments with valid concerns (e.g., double charge), email <a href="mailto:support@hipowerbc.xyz" class="text-primary font-semibold hover:underline">support@hipowerbc.xyz</a> with your transaction reference.
+                        After cancelling a booking at least 24 hours before its start, a <strong>Request a Refund</strong> button becomes available for <strong>24 hours</strong>. Submit it from Dashboard &rarr; My Bookings or the Refund Request page. Approved and verified requests qualify for a <strong>100% full refund</strong> of the amount paid; payment verification and reimbursement are handled manually by the admin.
                     </div>
                 </details>
 
@@ -359,7 +359,7 @@ if ($support_error !== '') {
                         <span class="material-symbols-outlined text-outline text-[18px] faq-arrow shrink-0">expand_more</span>
                     </summary>
                     <div class="px-5 pb-4 text-sm text-on-surface-variant leading-relaxed">
-                        Browse the <a href="ecommerce" class="text-primary font-semibold hover:underline">Pro Shop</a>, add items to your cart, and proceed to checkout. You can pay via GCash, PayPal, or choose Pay at Counter for cash payment upon pickup.
+                        Browse the <a href="ecommerce" class="text-primary font-semibold hover:underline">Pro Shop</a>, add items to your cart, and proceed to checkout. Shop orders are paid at the counter (cash) when you pick up your items.
                     </div>
                 </details>
 
@@ -404,7 +404,7 @@ if ($support_error !== '') {
                         <ul class="list-disc ml-5 space-y-1">
                             <li>Court reservations are subject to availability and are not confirmed until payment is processed.</li>
                             <li>Pending Payment slots are not reserved and may be booked by other users at any time.</li>
-                            <li>Cancellations must be made at least 2 hours before the scheduled time.</li>
+                            <li>Cancellations must be made at least 24 hours before the scheduled start time. Within 24 hours of the slot, cancellation is not permitted.</li>
                             <li>Repeated no-shows may result in account restrictions.</li>
                         </ul>
                     </section>
@@ -415,7 +415,7 @@ if ($support_error !== '') {
                             <li>All payments are processed through third-party gateways (PayMongo for GCash, PayPal). We do not store payment credentials.</li>
                             <li>Prices are in Philippine Pesos (PHP) unless otherwise stated.</li>
                             <li>Pay at Counter transactions must be completed within 30 minutes of booking or the reservation may be released.</li>
-                            <li>Refund requests are handled case-by-case and must be submitted within 7 days.</li>
+                            <li>Court bookings may only be cancelled at least 24 hours before the scheduled start. Refund requests must be submitted within 24 hours of cancelling; approved and verified requests receive a 100% full refund. Shop orders may only be cancelled while Pending.</li>
                         </ul>
                     </section>
 

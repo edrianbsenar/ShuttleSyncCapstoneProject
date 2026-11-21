@@ -1,21 +1,22 @@
 <?php
 // includes/bank_details.php
-// Editable bank-transfer + store pickup details shown during checkout.
-// IMPORTANT: Replace the placeholder account numbers/names with the real ones.
+// Editable GCash/Maya + store pickup details shown during checkout.
 
 function bankAccountDetails(): array {
     return [
         [
-            'bank'      => 'UnionBank of the Philippines',
-            'account_name' => 'ShuttleSync Business',
-            'account_number' => '0000-0000-0000',
-            'type'      => 'Savings',
+            'bank'           => 'GCash',
+            'account_name'   => 'Edrian Senar',
+            'account_number' => '09919903646',
+            'type'           => 'GCash',
+            'qr'             => '/img/qr/gcash_qr.JPG',
         ],
         [
-            'bank'      => 'China Bank',
-            'account_name' => 'ShuttleSync Business',
-            'account_number' => '0000-0000-0000',
-            'type'      => 'Savings',
+            'bank'           => 'Maya',
+            'account_name'   => 'Edrian Senar',
+            'account_number' => '09919903646',
+            'type'           => 'Maya',
+            'qr'             => '/img/qr/maya_qr.JPG',
         ],
     ];
 }

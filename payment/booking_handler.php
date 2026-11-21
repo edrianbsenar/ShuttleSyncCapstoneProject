@@ -8,6 +8,7 @@ header('Content-Type: application/json');
 
 require_once __DIR__ . '/../includes/config.php';
 require_once __DIR__ . '/../includes/database_connect.php';
+require_once __DIR__ . '/../includes/notification_helper.php';
 
 Config::load();
 
@@ -34,13 +35,12 @@ function getBookingWithTax(int $booking_id, int $user_id, PDO $pdo): array {
     $booking = $stmt->fetch();
     if (!$booking) throw new Exception('Booking not found or already paid.');
     
-    $tax_rate = (float)Config::get('PAYMENT_TAX_RATE', 0.08);
-    $tax = $booking['total_price'] * $tax_rate;
-    $total = $booking['total_price'] + $tax;
+    // Tax removed system-wide: no tax is added to bookings.
+    $total = $booking['total_price'];
     
     return [
         'booking' => $booking,
-        'tax' => number_format($tax, 2, '.', ''),
+        'tax' => '0.00',
         'total' => number_format($total, 2, '.', ''),
     ];
 }
@@ -165,6 +165,13 @@ try {
             $txn_id = $capture['id'];
             
             $pdo->prepare("UPDATE Bookings SET status = 'Confirmed' WHERE booking_id = ? AND status = 'Pending Payment'")->execute([$booking_id]);
+            
+            // Notify player
+            try {
+                notify_booking_status_change($pdo, $booking_id, 'Pending Payment', 'Confirmed', null);
+            } catch (Exception $e) {
+                error_log("Notification failed: " . $e->getMessage());
+            }
             
             echo json_encode(['success' => true, 'transaction_id' => $txn_id]);
             break;

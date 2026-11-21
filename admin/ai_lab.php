@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 // Start session
 require_once __DIR__ . '/../includes/session_boot.php';
 
@@ -173,80 +173,12 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
     <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
     <title>AI Lab Engagement Insights | HI-POWER</title>
     <?php include __DIR__ . '/../includes/tailwind_config.php'; ?>
-    <style>
-        /* Fill the viewport beside the fixed 260px admin sidebar. */
-        html, body { min-height: 100%; }
-        body { overflow-x: hidden; }
-        #ai-lab-main {
-            box-sizing: border-box;
-            width: calc(100% - 260px);
-            max-width: none !important;
-            margin-left: 260px;
-            margin-right: 0;
-            min-width: 0;
-            padding: clamp(16px, 2vw, 32px);
-        }
-        #ai-lab-main > * { min-width: 0; }
-        #ai-lab-main .hp-page-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-        #ai-lab-main .hp-ai-recommendation {
-            background: linear-gradient(120deg, #080F17 0%, #101C29 72%, #172B3D 100%) !important;
-            color: #FFFFFF !important;
-            border: 1px solid rgba(255,255,255,.09);
-        }
-        #ai-lab-main .hp-ai-recommendation h2,
-        #ai-lab-main .hp-ai-recommendation h4 { color: #FFFFFF !important; }
-        #ai-lab-main .hp-ai-recommendation .hp-ai-description {
-            color: #D8E2EF !important;
-            line-height: 1.7;
-        }
-        #ai-lab-main .hp-ai-recommendation .hp-ai-impact {
-            background: rgba(255,255,255,.07) !important;
-            border: 1px solid rgba(255,255,255,.13);
-            color: #FFFFFF !important;
-        }
-        #ai-lab-main .hp-ai-recommendation .hp-ai-muted { color: #AFC0D2 !important; }
-        #ai-lab-main .hp-ai-recommendation .hp-ai-secondary {
-            color: #FFFFFF !important;
-            border-color: rgba(255,255,255,.35) !important;
-            background: rgba(255,255,255,.04) !important;
-        }
-        #ai-lab-main .hp-ai-recommendation .hp-ai-secondary:hover {
-            background: rgba(255,255,255,.12) !important;
-            border-color: #FF5722 !important;
-        }
-        #ai-lab-main .hp-ai-recommendation .text-primary-fixed-dim { color: #FFB199 !important; }
-        #ai-lab-main .hp-ai-recommendation .text-primary { color: #FF5722 !important; }
-        #ai-lab-main .hp-ai-recommendation a.bg-primary { background: #FF5722 !important; color: #FFFFFF !important; }
-        #ai-lab-main .grid, #ai-lab-main section, #ai-lab-main article { min-width: 0; }
-        #ai-lab-main svg { max-width: 100%; }
-        #ai-lab-main table { border-collapse: collapse; }
-        #aiDetailAnalytics, #fullLeaderboard { scroll-margin-top: 24px; }
-        @media (max-width: 1279px) {
-            #ai-lab-main .hp-ai-recommendation { gap: 24px; }
-            #ai-lab-main .hp-ai-impact { min-height: 180px; }
-        }
-        @media (max-width: 767px) {
-            #ai-lab-main {
-                width: 100%;
-                margin-left: 0;
-                padding: 76px 16px 24px;
-            }
-            #ai-lab-main > header { align-items: stretch; }
-            #ai-lab-main .hp-page-actions { width: 100%; }
-            #ai-lab-main .hp-page-actions > * { flex: 1 1 auto; justify-content: center; }
-            #ai-lab-main .hp-ai-recommendation { padding: 22px !important; align-items: stretch; }
-            #ai-lab-main .hp-ai-recommendation .hp-ai-impact { width: 100%; }
-            #ai-lab-main .heatmap-cell { padding: 12px; }
-            #ai-lab-main .heatmap-cell .text-2xl { font-size: 1.25rem; }
-            #ai-lab-main footer { flex-direction: column; gap: 12px; }
-        }
-    </style>
 </head>
 <body class="bg-background text-on-surface min-h-screen">
 
 <?php include __DIR__ . '/includes/admin_header.php'; ?>
 
-    <main id="ai-lab-main" class="ml-0 md:ml-64 flex-grow p-gutter overflow-x-hidden">
+    <main class="ml-0 md:ml-64 flex-grow p-gutter max-w-container-max mx-auto overflow-x-hidden">
         
         <header class="mb-margin-md pt-4 flex flex-col md:flex-row justify-between items-start md:items-end gap-4">
             <div>
@@ -344,9 +276,9 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
             <?php endif; ?>
         </section>
 
-        <section class="grid grid-cols-1 xl:grid-cols-12 gap-gutter mb-gutter min-w-0">
+        <section class="grid grid-cols-1 md:grid-cols-12 gap-gutter mb-gutter">
             
-            <div class="xl:col-span-4 bg-surface-container-lowest kinetic-border rounded-xl p-6 relative overflow-hidden group min-w-0">
+            <div class="md:col-span-4 bg-surface-container-lowest kinetic-border rounded-xl p-6 relative overflow-hidden group">
                 <div class="absolute top-0 right-0 p-4 opacity-10 transition-opacity group-hover:opacity-20 text-primary">
                     <span class="material-symbols-outlined !text-6xl">show_chart</span>
                 </div>
@@ -365,7 +297,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
                 </p>
             </div>
 
-            <div class="xl:col-span-8 bg-surface-container-lowest kinetic-border rounded-xl p-6 min-w-0">
+            <div class="md:col-span-8 bg-surface-container-lowest kinetic-border rounded-xl p-6">
                 <div class="flex justify-between items-center mb-6">
                     <div>
                         <p class="text-label-md font-label-md text-on-surface-variant uppercase tracking-wider">AI Coach Feedback Loops</p>
@@ -404,9 +336,9 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
             </div>
         </section>
 
-        <section class="grid grid-cols-1 xl:grid-cols-12 gap-gutter min-w-0">
+        <section class="grid grid-cols-1 md:grid-cols-12 gap-gutter">
             
-            <div class="xl:col-span-7 bg-surface-container-lowest kinetic-border rounded-xl p-6 min-w-0">
+            <div class="md:col-span-7 bg-surface-container-lowest kinetic-border rounded-xl p-6">
                 <div class="flex items-center justify-between mb-8">
                     <div>
                         <h3 class="text-headline-md font-headline-md text-on-surface">Movement Analysis Heatmap</h3>
@@ -417,7 +349,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
                     </div>
                 </div>
                 
-                <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div class="grid grid-cols-4 gap-3 h-64">
                     <?php 
                     $colors = [
                         'bg-primary text-white shadow-lg',
@@ -434,7 +366,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
                         $color_class = $colors[$i] ?? 'bg-surface-container text-outline';
                         $i++;
                     ?>
-                    <div class="heatmap-cell <?php echo $color_class; ?> min-h-[120px] rounded-lg p-4 flex flex-col justify-end cursor-default border border-outline-variant/30">
+                    <div class="heatmap-cell <?php echo $color_class; ?> h-full rounded-lg p-4 flex flex-col justify-end cursor-default border border-outline-variant/30">
                         <span class="text-[10px] font-bold uppercase tracking-widest break-words"><?php echo htmlspecialchars($category); ?></span>
                         <span class="text-2xl font-bold mt-1"><?php echo $pct; ?>%</span>
                     </div>
@@ -442,7 +374,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
                 </div>
             </div>
 
-            <div class="xl:col-span-5 bg-surface-container-lowest kinetic-border rounded-xl p-6 overflow-hidden flex flex-col min-w-0">
+            <div class="md:col-span-5 bg-surface-container-lowest kinetic-border rounded-xl p-6 overflow-hidden flex flex-col">
                 <div class="flex justify-between items-center mb-6">
                     <h3 class="text-headline-md font-headline-md text-on-surface">Top AI Lab Performers</h3>
                     <span class="material-symbols-outlined text-outline">emoji_events</span>
@@ -524,14 +456,6 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
                 <p class="hp-ai-muted text-xs uppercase tracking-widest font-bold mt-2">Estimated user retention lift</p>
             </div>
         </section>
-        
-        <footer class="mt-margin-md pt-8 border-t border-outline-variant flex justify-between text-[12px] font-bold tracking-widest text-outline uppercase pb-8">
-            <p>© 2024 HI-POWER Technologies.</p>
-            <div class="flex gap-6">
-                <a class="hover:text-primary transition-colors" href="analytics.php">System Status</a>
-                <a class="hover:text-primary transition-colors" href="/support.php?tab=contact">Support</a>
-            </div>
-        </footer>
 
     
         <section id="aiDetailAnalytics" class="mt-8 bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">

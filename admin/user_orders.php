@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 // Start session
 require_once __DIR__ . '/../includes/session_boot.php';
 
@@ -14,6 +14,10 @@ if ($_SESSION['role'] !== 'Admin' && $_SESSION['role'] !== 'Head Manager') {
 
 require_once __DIR__ . '/../includes/database_connect.php';
 require_once __DIR__ . '/../includes/csrf_helper.php';
+require_once __DIR__ . '/../includes/notification_helper.php';
+require_once __DIR__ . '/../includes/inventory_helper.php';
+
+inventory_ensure_schema($pdo);
 
 $admin_name = $_SESSION['full_name'];
 $admin_role = $_SESSION['role'];
@@ -59,6 +63,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
                 throw new Exception("Order is already finalised.");
             }
 
+            $old_status = $current;
             $pdo->beginTransaction();
 
             if ($new_status === 'Completed') {
@@ -72,29 +77,29 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['action'])) {
                 $pdo->prepare("UPDATE Orders SET status = ? WHERE order_id = ?")->execute([$new_status, $order_id]);
             }
 
-            // Restore stock when an order is cancelled and its payment was already
-            // verified (stock is deducted at payment verification).
-            if ($new_status === 'Cancelled') {
-                $paid = false;
-                try {
-                    $pst = $pdo->prepare("SELECT p.status FROM payments p JOIN Orders o ON o.payment_id = p.payment_id WHERE o.order_id = ?");
-                    $pst->execute([$order_id]);
-                    $paid = ($pst->fetchColumn() === 'Verified');
-                } catch (PDOException $e) {
-                    $paid = false;
+            // Older orders may never have had stock reserved. Reserve now when
+            // staff moves one to a fulfilled state (idempotent for new orders).
+            if (in_array($new_status, ['Processing', 'Completed'], true)) {
+                if (deduct_stock_for_order($pdo, $order_id) === HP_STOCK_DEDUCT_ERROR) {
+                    throw new Exception("Could not reserve stock for this order.");
                 }
+            }
 
-                if ($paid) {
-                    $items = $pdo->prepare("SELECT product_id, quantity FROM payment_items WHERE order_id = ? AND item_type = 'shop' AND product_id IS NOT NULL");
-                    $items->execute([$order_id]);
-                    $restock = $pdo->prepare("UPDATE Products SET stock_quantity = stock_quantity + ? WHERE product_id = ?");
-                    while ($row = $items->fetch()) {
-                        $restock->execute([(int)$row['quantity'], $row['product_id']]);
-                    }
+            // Cancelling returns exactly what was actually deducted — no double restock.
+            if ($new_status === 'Cancelled') {
+                if (restore_stock_for_order($pdo, $order_id) === HP_STOCK_DEDUCT_ERROR) {
+                    throw new Exception("Could not return stock for this order.");
                 }
             }
 
             $pdo->commit();
+            
+            // Notify player
+            try {
+                notify_order_status_change($pdo, $order_id, $old_status, $new_status);
+            } catch (Exception $e) {
+                error_log("Notification failed: " . $e->getMessage());
+            }
 
             $label = order_status_info($new_status)['label'];
             $success_message = "Order #ORD-" . str_pad($order_id, 5, '0', STR_PAD_LEFT) . " marked as " . $label . ".";
@@ -327,14 +332,6 @@ $all_orders = $orders_stmt->fetchAll();
                 <div class="absolute inset-0 bg-gradient-to-br from-primary via-primary to-primary-container opacity-50 pointer-events-none"></div>
             </div>
         </div>
-        
-        <footer class="mt-margin-md pt-8 border-t border-outline-variant flex justify-between text-[12px] font-bold tracking-widest text-outline uppercase pb-8">
-            <p>© 2024 HI-POWER Technologies.</p>
-            <div class="flex gap-6">
-                <a class="hover:text-primary transition-colors" href="analytics.php">System Status</a>
-                <a class="hover:text-primary transition-colors" href="/support.php?tab=contact">Support</a>
-            </div>
-        </footer>
     </main>
 </div>
 
@@ -382,7 +379,7 @@ $all_orders = $orders_stmt->fetchAll();
         document.getElementById('omSub').innerHTML = '&nbsp;';
         document.getElementById('omTotal').textContent = '₱0.00';
 
-        fetch('order_items?order_id=' + encodeURIComponent(orderId))
+        fetch('order_items.php?order_id=' + encodeURIComponent(orderId))
             .then(r => r.json())
             .then(d => {
                 if (!d.ok) { document.getElementById('omBody').innerHTML = '<p class="text-error text-sm font-bold">' + (d.error || 'Failed to load') + '</p>'; return; }
@@ -453,3 +450,4 @@ $all_orders = $orders_stmt->fetchAll();
 
 </body>
 </html>
+

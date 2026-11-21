@@ -2,7 +2,7 @@
 // logout.php
 
 // 1. Initialize the session
-session_start();
+require_once __DIR__ . '/includes/session_boot.php';
 
 // 2. Unset all of the session variables
 $_SESSION = array();
@@ -19,7 +19,11 @@ if (ini_get("session.use_cookies")) {
 // 4. Destroy the session
 session_destroy();
 
-// 5. Redirect back to the login page
+// 5. Clear the recent-orders helper cookie so the next account signed in on
+//    this browser cannot see the previous user's order history.
+setcookie('hp_my_orders', '', time() - 42000, '/');
+
+// 6. Redirect back to the login page
 if (isset($_GET['type']) && $_GET['type'] == 'admin') {
     header("Location: admin/index.php");
 } else {

@@ -47,7 +47,14 @@ try {
         $ist->execute([$order_id]);
         $items = $ist->fetchAll(PDO::FETCH_ASSOC);
     } catch (PDOException $e) {
-        $items = [];
+        // Fall back to the legacy Order_Items table when present.
+        try {
+            $ist = $pdo->prepare("SELECT product_name AS description, quantity, (price * quantity) AS amount FROM Order_Items WHERE order_id = ? ORDER BY order_item_id ASC");
+            $ist->execute([$order_id]);
+            $items = $ist->fetchAll(PDO::FETCH_ASSOC);
+        } catch (PDOException $e2) {
+            $items = [];
+        }
     }
 
     echo json_encode([

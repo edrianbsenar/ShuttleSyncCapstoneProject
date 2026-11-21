@@ -13,6 +13,10 @@ if ($_SESSION['role'] !== 'Admin' && $_SESSION['role'] !== 'Head Manager') {
 
 require_once __DIR__ . '/../includes/database_connect.php';
 require_once __DIR__ . '/../includes/csrf_helper.php';
+require_once __DIR__ . '/../includes/notification_helper.php';
+require_once __DIR__ . '/../includes/inventory_helper.php';
+
+inventory_ensure_schema($pdo);
 
 $admin_name = $_SESSION['full_name'];
 $admin_role = $_SESSION['role'];
@@ -44,13 +48,35 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && ($_POST['action'] ?? '') === 'verify
                 if (!empty($row['order_id'])) {
                     // Payment settled -> order awaits fulfillment ('Pending').
                     $pdo->prepare("UPDATE Orders SET status = 'Pending' WHERE order_id = ? AND status IN ('Pending Payment', 'Confirmed')")->execute([$row['order_id']]);
+                    
+                    // Notify player
+                    try {
+                        notify_order_status_change($pdo, $row['order_id'], 'Pending Payment', 'Pending');
+                    } catch (Exception $e) {
+                        error_log("Notification failed: " . $e->getMessage());
+                    }
                 }
-                if (!empty($row['product_id'])) {
+                if (!empty($row['order_id'])) {
+                    // Idempotent: checkout already reserved the stock, so this is
+                    // a no-op for orders placed after the inventory fix.
+                    $stock_result = deduct_stock_for_order($pdo, (int)$row['order_id']);
+                    if ($stock_result === HP_STOCK_DEDUCT_ERROR) {
+                        throw new Exception("Could not update stock for the verified order.");
+                    }
+                } elseif (!empty($row['product_id'])) {
+                    // Legacy item without an order_id — deduct directly.
                     $pdo->prepare("UPDATE Products SET stock_quantity = GREATEST(stock_quantity - ?, 0) WHERE product_id = ?")->execute([(int)$row['quantity'], $row['product_id']]);
                 }
             } elseif ($row['item_type'] === 'booking') {
                 if (!empty($row['booking_id'])) {
                     $pdo->prepare("UPDATE Bookings SET status = 'Confirmed' WHERE booking_id = ? AND status = 'Pending Payment'")->execute([$row['booking_id']]);
+                    
+                    // Notify player
+                    try {
+                        notify_booking_status_change($pdo, $row['booking_id'], 'Pending Payment', 'Confirmed', null);
+                    } catch (Exception $e) {
+                        error_log("Notification failed: " . $e->getMessage());
+                    }
                 }
             }
         }
@@ -83,22 +109,64 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && ($_POST['action'] ?? '') === 'cancel
 
         $was_verified = ($was === 'Verified');
 
+        // Stock is reserved at checkout now, so cancelling a payment must give it
+        // back whether or not the payment had already been verified. The helper is
+        // idempotent, so repeated cancellations can never inflate inventory.
+        $oids = $pdo->prepare("SELECT DISTINCT order_id FROM payment_items
+                               WHERE payment_id = ? AND item_type = 'shop' AND order_id IS NOT NULL AND order_id > 0");
+        $oids->execute([$payment_id]);
+        foreach ($oids->fetchAll(PDO::FETCH_COLUMN) as $oid) {
+            if (restore_stock_for_order($pdo, (int)$oid) === HP_STOCK_DEDUCT_ERROR) {
+                throw new Exception("Could not return stock for a cancelled order.");
+            }
+        }
+
+        // Legacy lines without an order_id only had stock deducted when a payment
+        // was verified, so only restock those in that case.
         if ($was_verified) {
-            $items = $pdo->prepare("SELECT * FROM payment_items WHERE payment_id = ?");
-            $items->execute([$payment_id]);
-            while ($row = $items->fetch()) {
-                if (!empty($row['product_id'])) {
-                    $pdo->prepare("UPDATE Products SET stock_quantity = stock_quantity + ? WHERE product_id = ?")->execute([(int)$row['quantity'], $row['product_id']]);
-                }
+            $legacy = $pdo->prepare("SELECT product_id, quantity FROM payment_items
+                                     WHERE payment_id = ? AND item_type = 'shop'
+                                       AND product_id IS NOT NULL
+                                       AND (order_id IS NULL OR order_id = 0)");
+            $legacy->execute([$payment_id]);
+            $restock = $pdo->prepare("UPDATE Products SET stock_quantity = stock_quantity + ? WHERE product_id = ?");
+            while ($row = $legacy->fetch(PDO::FETCH_ASSOC)) {
+                $restock->execute([(int)$row['quantity'], (int)$row['product_id']]);
             }
         }
 
         $pdo->prepare("UPDATE payments SET status = 'Cancelled', cancelled_at = NOW(), cancel_reason = ? WHERE payment_id = ?")->execute([$reason, $payment_id]);
 
+        // Get affected orders and bookings for notifications
+        $affected_orders = $pdo->prepare("SELECT o.order_id, o.status FROM Orders o JOIN payment_items pi ON o.order_id = pi.order_id WHERE pi.payment_id = ? AND o.status != 'Cancelled'");
+        $affected_orders->execute([$payment_id]);
+        $orders_to_notify = $affected_orders->fetchAll(PDO::FETCH_ASSOC);
+        
+        $affected_bookings = $pdo->prepare("SELECT b.booking_id, b.status FROM Bookings b JOIN payment_items pi ON b.booking_id = pi.booking_id WHERE pi.payment_id = ? AND b.status != 'Cancelled'");
+        $affected_bookings->execute([$payment_id]);
+        $bookings_to_notify = $affected_bookings->fetchAll(PDO::FETCH_ASSOC);
+
         $pdo->prepare("UPDATE Orders o JOIN payment_items pi ON o.order_id = pi.order_id SET o.status = 'Cancelled' WHERE pi.payment_id = ? AND o.status != 'Cancelled'")->execute([$payment_id]);
         $pdo->prepare("UPDATE Bookings b JOIN payment_items pi ON b.booking_id = pi.booking_id SET b.status = 'Cancelled' WHERE pi.payment_id = ? AND b.status != 'Cancelled'")->execute([$payment_id]);
 
         $pdo->commit();
+        
+        // Send notifications after commit
+        foreach ($orders_to_notify as $order) {
+            try {
+                notify_order_status_change($pdo, $order['order_id'], $order['status'], 'Cancelled');
+            } catch (Exception $e) {
+                error_log("Notification failed: " . $e->getMessage());
+            }
+        }
+        foreach ($bookings_to_notify as $booking) {
+            try {
+                notify_booking_status_change($pdo, $booking['booking_id'], $booking['status'], 'Cancelled', $reason);
+            } catch (Exception $e) {
+                error_log("Notification failed: " . $e->getMessage());
+            }
+        }
+        
         $success_message = "Payment cancelled. Linked orders and bookings have been cancelled.";
     } catch (Exception $e) {
         if ($pdo->inTransaction()) $pdo->rollBack();
@@ -130,7 +198,7 @@ foreach ($payments as $p) { if ($p['status'] === 'Pending Payment') $pending_cou
 <head>
     <meta charset="utf-8">
     <meta content="width=device-width, initial-scale=1.0" name="viewport">
-    <title>Bank Transfer Payments | HI-POWER Admin</title>
+    <title>Payments | HI-POWER Admin</title>
     <?php include __DIR__ . '/../includes/tailwind_config.php'; ?>
     <style>
         .badge-pending { background:#fffbeb; color:#d97706; border:1px solid #fde68a; }
@@ -166,8 +234,8 @@ foreach ($payments as $p) { if ($p['status'] === 'Pending Payment') $pending_cou
 
     <div class="flex items-center justify-between mb-6">
         <div>
-            <h1 class="text-2xl font-bold text-on-surface">Bank Transfer Payments</h1>
-            <p class="text-sm text-on-surface-variant">Tap a row or "View Receipt" to inspect and verify a transfer</p>
+            <h1 class="text-2xl font-bold text-on-surface">Payments</h1>
+            <p class="text-sm text-on-surface-variant">Tap a row to inspect and verify GCash/Maya or Pay-at-Counter payments</p>
         </div>
         <?php if ($pending_count > 0): ?>
             <span class="badge-pending px-3 py-1.5 rounded-full text-xs font-bold"><?php echo $pending_count; ?> pending</span>
@@ -190,7 +258,7 @@ foreach ($payments as $p) { if ($p['status'] === 'Pending Payment') $pending_cou
     <?php if (empty($payments)): ?>
         <div class="bg-white border border-dashed border-outline-variant/60 rounded-2xl p-16 text-center">
             <span class="material-symbols-outlined text-5xl text-outline/40">account_balance_wallet</span>
-            <p class="text-on-surface-variant mt-3">No bank transfer payments yet.</p>
+            <p class="text-on-surface-variant mt-3">No payments yet.</p>
         </div>
     <?php else: ?>
     <div class="bg-white rounded-2xl border border-outline-variant shadow-kinetic overflow-hidden">
@@ -227,7 +295,7 @@ foreach ($payments as $p) { if ($p['status'] === 'Pending Payment') $pending_cou
             <div class="col-span-2 flex items-center md:justify-end gap-2 shrink-0">
                 <span class="hidden md:inline px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-widest <?php echo $badge_class; ?>"><?php echo htmlspecialchars($p['status']); ?></span>
                 <button type="button" onclick="openReceipt(<?php echo $p['payment_id']; ?>)" class="px-3 py-1.5 rounded-lg bg-primary/10 text-primary font-bold text-xs hover:bg-primary/20 transition-colors inline-flex items-center gap-1.5">
-                    <span class="material-symbols-outlined text-[15px]">receipt_long</span> Receipt
+                    <span class="material-symbols-outlined text-[15px]"><?php echo empty($p['receipt_path']) ? 'storefront' : 'receipt_long'; ?></span> <?php echo empty($p['receipt_path']) ? 'Details' : 'Receipt'; ?>
                 </button>
             </div>
         </div>
@@ -272,10 +340,19 @@ foreach ($payments as $p) { if ($p['status'] === 'Pending Payment') $pending_cou
             <div class="grid grid-cols-1 md:grid-cols-3 gap-5 p-6">
                 <!-- Receipt -->
                 <div class="md:col-span-1">
+                    <?php if (!empty($p['receipt_path'])): ?>
                     <p class="text-[10px] font-bold text-outline uppercase tracking-widest mb-2">Transfer Receipt</p>
                     <a href="<?php echo htmlspecialchars($p['receipt_path']); ?>" target="_blank" class="block border border-outline-variant rounded-xl overflow-hidden group">
                         <img src="<?php echo htmlspecialchars($p['receipt_path']); ?>" alt="Transfer receipt" class="w-full h-44 object-cover bg-surface-variant group-hover:scale-105 transition-transform duration-300">
                     </a>
+                    <?php else: ?>
+                    <p class="text-[10px] font-bold text-outline uppercase tracking-widest mb-2">Payment Method</p>
+                    <div class="w-full h-44 rounded-xl border border-dashed border-amber-300 bg-amber-50 flex flex-col items-center justify-center text-center px-4">
+                        <span class="material-symbols-outlined text-amber-500 text-4xl">storefront</span>
+                        <p class="mt-2 text-sm font-bold text-amber-700">Pay at Counter</p>
+                        <p class="text-[11px] text-amber-600 mt-1">No online receipt required. Confirm when cash is received.</p>
+                    </div>
+                    <?php endif; ?>
                     <p class="text-[11px] text-outline mt-2">Submitted <?php echo date('M d, Y g:i A', strtotime($p['created_at'])); ?></p>
                     <?php if ($is_verified && !empty($p['verified_at'])): ?>
                         <p class="text-[11px] text-emerald-600 font-bold">Verified <?php echo date('M d, Y g:i A', strtotime($p['verified_at'])); ?></p>
@@ -322,7 +399,7 @@ foreach ($payments as $p) { if ($p['status'] === 'Pending Payment') $pending_cou
 
             <!-- Footer actions -->
             <div class="px-6 py-4 border-t border-outline-variant/50 bg-surface/60 flex items-center justify-between gap-3">
-                <p class="text-[11px] text-outline"><?php echo $is_cancelled ? 'Rejected &mdash; orders/bookings are voided.' : 'Compare with the exact transfer amount before deciding.'; ?></p>
+                <p class="text-[11px] text-outline"><?php echo $is_cancelled ? 'Rejected &mdash; orders/bookings are voided.' : (empty($p['receipt_path']) ? 'Confirm the cash payment at the counter before verifying.' : 'Compare with the exact transfer amount before deciding.'); ?></p>
                 <div class="flex items-center gap-2 shrink-0">
                     <button type="button" onclick="closeModal()" class="px-4 py-2.5 rounded-xl font-bold text-sm bg-surface-container-highest text-on-surface-variant hover:bg-outline-variant/30 transition-colors">Close</button>
                     <?php if ($is_pending): ?>

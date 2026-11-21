@@ -16,11 +16,21 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
     $email = $_SESSION['reset_email'];
     $current_time = date('Y-m-d H:i:s');
 
+    // Track brute-force attempts — max 5 tries before the code is invalidated.
+    $_SESSION['code_attempts'] = ($_SESSION['code_attempts'] ?? 0) + 1;
+    if ($_SESSION['code_attempts'] > 5) {
+        unset($_SESSION['reset_email'], $_SESSION['code_attempts']);
+        header("Location: /authentication/forgot_password?error=too_many_attempts");
+        exit;
+    }
+
     $stmt = $pdo->prepare("SELECT reset_code, code_expires FROM Users WHERE email = :email LIMIT 1");
     $stmt->execute(['email' => $email]);
     $user = $stmt->fetch();
 
-    if ($user && $user['reset_code'] === $entered_code && $current_time <= $user['code_expires']) {
+    // Use hash_equals for timing-safe comparison (fix #23).
+    if ($user && hash_equals((string)$user['reset_code'], (string)$entered_code) && $current_time <= $user['code_expires']) {
+        unset($_SESSION['code_attempts']);
         $_SESSION['code_verified'] = true;
         header("Location: /authentication/reset_password");
         exit;
@@ -34,24 +44,24 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 <head>
     <meta charset="utf-8"/>
     <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-    <title>Verify Code | ShuttleSync</title>
+    <title>Verify Code | HI-POWER</title>
     <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
     <script>
         tailwind.config = {
             theme: {
                 extend: {
-                    fontFamily: { sans: ['Inter', 'sans-serif'] },
-                    colors: { brand: { blue: '#3145e6', red: '#ed4a30', dark: '#0f172a' } }
+                    fontFamily: { sans: ['Manrope', 'sans-serif'] },
+                    colors: { brand: { blue: '#ff5722', red: '#ed4817', dark: '#080f17' } }
                 }
             }
         }
     </script>
     <style>
-        * { font-family: 'Inter', sans-serif; }
+        * { font-family: 'Manrope', sans-serif; }
         .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
 
         @keyframes slide-up { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
@@ -66,19 +76,19 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         .anim-gradient { background-size: 200% 200%; animation: gradient-shift 8s ease infinite; }
         .court-grid { background-image: linear-gradient(rgba(255,255,255,0.07) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.07) 1px, transparent 1px); background-size: 40px 40px; }
 
-        .btn-primary { background: linear-gradient(135deg, #3145e6, #4f6eff); transition: all 0.3s ease; }
-        .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 25px -5px rgba(49,69,230,0.4); }
+        .btn-primary { background: linear-gradient(135deg, #ff5722, #ff7a50); transition: all 0.3s ease; }
+        .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 25px -5px rgba(255,87,34,0.4); }
         .btn-primary:active { transform: translateY(0); }
 
         .code-input {
             width: 56px; height: 64px; text-align: center;
             font-size: 24px; font-weight: 700; border: 2px solid #e2e8f0;
-            border-radius: 14px; background: #f8fafc; color: #0f172a;
+            border-radius: 14px; background: #f8fafc; color: #080f17;
             transition: all 0.2s ease; outline: none;
             caret-color: transparent;
         }
-        .code-input:focus { border-color: #3145e6; box-shadow: 0 0 0 3px rgba(49,69,230,0.1); background: white; }
-        .code-input.filled { border-color: #3145e6; background: rgba(49,69,230,0.04); }
+        .code-input:focus { border-color: #ff5722; box-shadow: 0 0 0 3px rgba(255,87,34,0.1); background: white; }
+        .code-input.filled { border-color: #ff5722; background: rgba(255,87,34,0.04); }
         .code-input.pop { animation: pop 0.2s ease; }
 
         @media (max-width: 400px) {
@@ -90,7 +100,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 <div class="flex min-h-screen">
 
     <!-- Left Branding Panel -->
-    <div class="hidden lg:flex lg:w-[55%] relative overflow-hidden bg-gradient-to-br from-brand-dark via-[#1a2550] to-[#0d1b3e] anim-gradient" style="background-size: 200% 200%;">
+    <div class="hidden lg:flex lg:w-[55%] relative overflow-hidden bg-gradient-to-br from-brand-dark via-[#101c29] to-[#080f17] anim-gradient" style="background-size: 200% 200%;">
         <div class="court-grid absolute inset-0"></div>
 
         <div class="relative z-10 flex flex-col justify-center px-16 xl:px-20 max-w-2xl">
@@ -98,7 +108,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                 <div class="flex items-center gap-3 mb-8">
                     <img src="/img/logo.png" alt="Logo" class="w-12 h-12 rounded-xl shadow-lg shadow-black/20">
                     <div>
-                        <span class="text-xl font-bold text-white tracking-tight">Shuttle</span><span class="text-xl font-bold text-brand-red tracking-tight">Sync</span>
+                        <span class="text-xl font-extrabold text-white tracking-tight">HI-POWER</span>
                     </div>
                 </div>
             </div>
@@ -133,7 +143,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 
             <div class="lg:hidden flex items-center gap-2 mb-8 anim-slide-up anim-slide-up-1">
                 <img src="/img/logo.png" alt="Logo" class="w-10 h-10 rounded-xl">
-                <span class="text-lg font-bold"><span class="text-brand-blue">Shuttle</span><span class="text-brand-red">Sync</span></span>
+                <span class="text-lg font-extrabold text-[#ff5722]">HI-POWER</span>
             </div>
 
             <a href="/authentication/forgot_password" class="inline-flex items-center gap-1.5 text-sm text-gray-400 hover:text-brand-blue transition-colors mb-6 group anim-slide-up anim-slide-up-1">
